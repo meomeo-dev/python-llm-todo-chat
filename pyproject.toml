@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# 更独特的包名，避免与潜在占用冲突
+name = "llm-todo-chat-cli"
+version = "0.1.0"
+description = "CLI Todo & LLM invoke toolkit (YAML multi-doc todo + DeepSeek/OpenRouter/Moonshot invocations + MCP helpers)"
+readme = "README.md"
+authors = [ { name = "Jussker" } ]
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+keywords = ["todo", "cli", "llm", "deepseek", "openrouter", "moonshot", "mcp"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Developers",
+  "Topic :: Utilities",
+  "Topic :: Software Development :: Libraries :: Application Frameworks"
+]
+# 基本功能所需（可按需裁剪），可选依赖放 extras
+dependencies = [
+  "PyYAML>=6.0",
+  "portalocker>=2.8.2",
+  "duckdb>=0.10.0",
+  "prompt_toolkit>=3.0.0",
+  "rich>=13.0.0",
+  "fastmcp>=2.11.0"
+]
+
+[project.optional-dependencies]
+# 将一些功能拆成可选集合（安装: pip install llm-todo-chat[interactive]）
+interactive = ["prompt_toolkit>=3.0.0"]
+color = ["rich>=13.0.0"]
+db = ["duckdb>=0.10.0"]
+all = ["prompt_toolkit>=3.0.0", "rich>=13.0.0", "duckdb>=0.10.0"]
+
+[project.scripts]
+# 入口脚本（setuptools 安装时）：
+# - Unix/macOS: 生成 llm_todo_chat / llm-todo-chat 两个可执行文件
+# - Windows: 生成 llm_todo_chat.exe / llm-todo-chat.exe（pip / pipx 均适用）
+# 两种命名方便下划线或短横线风格调用，指向同一 main()
+llm_todo_chat = "llm_todo_chat:main"
+llm-todo-chat = "llm_todo_chat:main"  # 兼容短横线写法
+# Windows 下 setuptools 会自动生成 .exe 启动器（无需额外处理）；如需禁用可使用 pipx 安装环境隔离。
+
+[project.urls]
+Homepage = "https://github.com/your-org/your-repo"
+Source = "https://github.com/your-org/your-repo"
+Issues = "https://github.com/your-org/your-repo/issues"
+
+[tool.setuptools]
+# 确保 LICENSE / prompts / opensource 目录打包（如需）
+include-package-data = true
+py-modules = ["llm_todo_chat"]
+
+[tool.setuptools.package-data]
+# 若未来将 prompts 迁入包内，可放置匹配
+"llm_todo_chat" = ["*.md", "*.prompt.md"]
