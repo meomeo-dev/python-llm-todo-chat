@@ -38,12 +38,27 @@ uv pip install -e .
 
 ---
 
+安装为系统工具(MACOS)
+```zsh
+# 按需开启网络代理
+# export http_proxy=http://127.0.0.1:2080 && export HTTP_PROXY=http://127.0.0.1:2080 && export https_proxy=http://127.0.0.1:2080 && export HTTPS_PROXY=http://127.0.0.1:2080 && export all_proxy=socks5://127.0.0.1:2080 && echo "网络代理配置完成"
+
+brew install pipx
+pipx install git+https://github.com/meomeo-dev/python-llm-todo-chat.git
+# pipx 会将其安装到虚拟环境后，然后挂在 ~/.local/bin 目录下
+
+# 安装完成后可直接执行
+llm_todo_chat --help
+```
+
+---
+
 ## 快速开始
 
 查看帮助：
 
 ```zsh
-python llm_todo_chat.py -h
+llm_todo_chat --help
 ```
 
 配置API_KEY

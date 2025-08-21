@@ -10,7 +10,7 @@ description = "CLI Todo & LLM invoke toolkit (YAML multi-doc todo + DeepSeek/Ope
 readme = "README.md"
 authors = [ { name = "Jussker" } ]
 license = { file = "LICENSE" }
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 keywords = ["todo", "cli", "llm", "deepseek", "openrouter", "moonshot", "mcp"]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -27,7 +27,8 @@ dependencies = [
   "duckdb>=0.10.0",
   "prompt_toolkit>=3.0.0",
   "rich>=13.0.0",
-  "fastmcp>=2.11.0"
+  "fastmcp>=2.11.0",
+  "python-dateutil>=2.9.0"
 ]
 
 [project.optional-dependencies]

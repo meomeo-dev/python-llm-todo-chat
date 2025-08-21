@@ -1319,9 +1319,11 @@ class ThinkTagExtractor:
         self._streamed_current_think: bool = (
             False  # 本轮最外层 <think> 是否已经产生过增量输出
         )
-
+        # 支持 <thinking> ... </thinking> 作为同义标签
+        self._open_tags = [self._OPEN, "<thinking>"]
+        self._close_tags = [self._CLOSE, "</thinking>"]
         # 预计算所有需要整体匹配的标签及其前缀集合（单反引号逐字符处理故不列入）
-        self._tags = [self._OPEN, self._CLOSE, self._FENCE]
+        self._tags = self._open_tags + self._close_tags + [self._FENCE]
         self._max_tag_len = max(len(t) for t in self._tags)
         self._prefixes = set()
         for t in self._tags:
@@ -1411,20 +1413,30 @@ class ThinkTagExtractor:
                 continue
 
             # 4. 解析标签（仅在普通文本上下文）
-            if process_text.startswith(self._OPEN, i):
-                self._enter_think()
-                i += len(self._OPEN)
+            opened = False
+            for _ot in self._open_tags:
+                if process_text.startswith(_ot, i):
+                    self._enter_think()
+                    i += len(_ot)
+                    opened = True
+                    break
+            if opened:
                 continue
 
-            if process_text.startswith(self._CLOSE, i):
-                if self.think_depth > 0:
-                    segs = self._leave_think()
-                    if segs:
-                        reasoning_segments.extend(segs)
-                else:
-                    # 孤立闭合标签，按普通文本输出
-                    self._emit(self._CLOSE)
-                i += len(self._CLOSE)
+            closed = False
+            for _ct in self._close_tags:
+                if process_text.startswith(_ct, i):
+                    if self.think_depth > 0:
+                        segs = self._leave_think()
+                        if segs:
+                            reasoning_segments.extend(segs)
+                    else:
+                        # 孤立闭合标签，按普通文本输出
+                        self._emit(_ct)
+                    i += len(_ct)
+                    closed = True
+                    break
+            if closed:
                 continue
 
             # 5. 普通字符
@@ -1573,16 +1585,27 @@ def invoke_deepseek(
                 if isinstance(content, str)
                 else json.dumps(msg, ensure_ascii=False)
             )
-            # 使用 ThinkTagExtractor 解析非流式结果里的 <think> 思考，剥离后返回纯正文
+            # 兼容非流式返回里单独的 reasoning_content 字段
+            reasoning_field = msg.get("reasoning_content") or ""
+            # 使用 ThinkTagExtractor 解析非流式结果里的 <think>/<thinking> 思考，剥离后返回纯正文
             extractor = ThinkTagExtractor()
             reasoning_segments, clean_part = extractor.feed(content_str or "")
             tail_reasoning, tail_clean = extractor.finish()
-            all_reasoning = reasoning_segments + tail_reasoning
+            all_reasoning = []
+            if reasoning_field:
+                all_reasoning.append(reasoning_field)
+            all_reasoning.extend(reasoning_segments + tail_reasoning)
+            # 去重（避免相同文本被重复发送到 panel）
+            seen = set()
+            dedup_reasoning = []
+            for seg in all_reasoning:
+                if seg and seg not in seen:
+                    seen.add(seg)
+                    dedup_reasoning.append(seg)
             clean_content = clean_part + tail_clean
-            if all_reasoning and on_reasoning:
-                for seg in all_reasoning:
-                    if seg:
-                        on_reasoning(seg)
+            if dedup_reasoning and on_reasoning:
+                for seg in dedup_reasoning:
+                    on_reasoning(seg)
             return (clean_content, usage) if return_usage else clean_content
         except Exception:
             fallback = json.dumps(obj, ensure_ascii=False)
@@ -2177,6 +2200,28 @@ def invoke_chat(
                 if isinstance(content, str)
                 else json.dumps(msg, ensure_ascii=False)
             )
+            # 对 deepseek 提供商的非流式结果也执行 <think>/<thinking> 剥离，保持与 invoke_deepseek 一致
+            if provider == "deepseek":
+                reasoning_field = msg.get("reasoning_content") or ""
+                extractor = ThinkTagExtractor()
+                reasoning_segments, clean_part = extractor.feed(content_str or "")
+                tail_reasoning, tail_clean = extractor.finish()
+                all_reasoning = []
+                if reasoning_field:
+                    all_reasoning.append(reasoning_field)
+                all_reasoning.extend(reasoning_segments + tail_reasoning)
+                # 去重
+                seen = set()
+                dedup_reasoning = []
+                for seg in all_reasoning:
+                    if seg and seg not in seen:
+                        seen.add(seg)
+                        dedup_reasoning.append(seg)
+                clean_content = clean_part + tail_clean
+                if dedup_reasoning and on_reasoning:
+                    for seg in dedup_reasoning:
+                        on_reasoning(seg)
+                return (clean_content, usage) if return_usage else clean_content
             return (content_str, usage) if return_usage else content_str
         except Exception:
             return (
@@ -3452,7 +3497,7 @@ try:
 except Exception:
     _FastMCPClient = None  # type: ignore
 
-_FASTMCP_CLIENT: Optional[_FastMCPClient] = None
+_FASTMCP_CLIENT: Optional[Any] = None
 _FASTMCP_CLIENT_CONFIG_HASH: Optional[str] = None
 
 
@@ -3584,7 +3629,7 @@ def _run_async(coro):
         raise RuntimeError(f"_run_async failed: {e}")
 
 
-def _ensure_fastmcp_client(force_recreate: bool = False) -> Optional[_FastMCPClient]:
+def _ensure_fastmcp_client(force_recreate: bool = False) -> Optional[Any]:
     global _FASTMCP_CLIENT, _FASTMCP_CLIENT_CONFIG_HASH
     if _FastMCPClient is None:
         return None
@@ -5369,21 +5414,53 @@ def interactive_invoke(
                 # 非流式：保持原面板风格
                 with console.status("[dim]模型思考中...[/dim]", spinner="dots", spinner_style=WEAK_BORDER):  # type: ignore
                     _t0 = time.perf_counter()
+                    reasoning_buf: List[str] = []
+
+                    def _collect_reasoning(seg: str) -> None:
+                        if seg:
+                            reasoning_buf.append(seg)
+
                     assistant, usage1 = invoke_chat(
                         messages,
                         model=model,
                         provider=provider,
                         api_key=resolved_key,
                         return_usage=True,
+                        on_reasoning=_collect_reasoning,  # 让非流式也接收思考
                     )
                     latest_elapsed = time.perf_counter() - _t0
-                # 新增：记录助手消息（非流式，无 reasoning）
+
+                # 先打印思考 Panel（若有）
+                if reasoning_buf:
+                    reasoning_text = "".join(reasoning_buf)
+                    try:
+                        from rich.text import Text  # type: ignore
+
+                        r_body = Text(reasoning_text, style=REASONING_STYLE)
+                    except Exception:
+                        r_body = reasoning_text
+                    try:
+                        console.print(
+                            Panel(
+                                r_body,
+                                title="助手（思考）",
+                                border_style=REASONING_BORDER,
+                                style=REASONING_PANEL_STYLE,
+                            )
+                        )  # type: ignore
+                    except Exception:
+                        print("[思考]\n" + reasoning_text)
+
+                # 打印助手正文
+                _print_assistant(assistant)
+
+                # 记录助手消息（含 reasoning）
                 chatdb_log_message(
                     chat_session_uuid,
                     turn_index,
                     "assistant",
                     assistant,
-                    reasoning=None,
+                    reasoning=("".join(reasoning_buf) if reasoning_buf else None),
                     usage=usage1,
                     elapsed_sec=latest_elapsed,
                 )
@@ -5710,10 +5787,7 @@ def interactive_invoke(
             # 若安全终止已触发，直接结束本轮并不再输出后续助手内容
             if conversation_terminated:
                 return
-
-            # 已流式输出过的回复无需再以面板重复打印
-            if not stream:
-                _print_assistant(assistant)
+            
             # 在助手 panel 下展示上下文窗口用量
             _print_token_usage(latest_usage, elapsed_sec=latest_elapsed)
             messages.append({"role": "assistant", "content": assistant})
