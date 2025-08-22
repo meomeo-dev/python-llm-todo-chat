@@ -44,6 +44,8 @@ __version__ = "0.1.0"
 #
 import argparse
 import ast
+import asyncio
+import base64
 import csv
 import datetime
 import getpass
@@ -56,6 +58,7 @@ import random
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -933,8 +936,14 @@ def build_role_identity_deep_researcher_prompt() -> str:
         "- 尚未闭合证据链时，不急于给出完整回答，优先继续工具驱动迭代。  \n"
         "- 单轮只做一个最小可验证动作；避免一次性并行大量检索导致噪声膨胀。  \n"
         "- 发现冲突信息：最小再验证（额外 targeted search 或 fetch 原文），明确冲突点与判据。  \n"
+        "- 上下文时效性：若问题含时间指示（如具体日期/“最新”/“今年”/“当前”/版本号）或属快变领域（时政、金融、版本发布、安全漏洞），进入“时效性优先”分支；否则默认“时间无关/低度相关”分支。  \n"
+        "   - **高度相关** (High Relevance) - 信息极新且时效性强，如实时新闻、市场数据  \n"
+        "   - **中度相关** (Medium Relevance) - 信息有时效性但不急迫，如季度报告、年度趋势  \n"
+        "   - **低度相关** (Low Relevance) - 信息变化缓慢，如基础理论、历史事件  \n"
+        "   - **时间无关** (Time-Invariant) - 信息基本恒定，如自然规律、数学公式  \n"
         "- 搜索贫乏：主动换维度（同义词 / 上下位概念 / 相关机制 / 约束条件）。  \n"
         "- 停止条件：多源一致且关键要素齐备；或继续成本显著升高；或需线下/付费/专门权限。  \n"
+        "- 工具不可用时的降级：若 ≤2 次重试仍失败，输出当前最佳可核实结论 + 缺口 + 建议下一步；严禁凭空推断。  \n"
         "\n\n"
         '工具调用格式：严格使用系统已定义的 <antml:function_calls> 结构；每个 <parameter name="commentary"> 必须写清：本次微目标 + 期望获取信息类型 + 与上一轮反思的衔接逻辑。  \n'
         "\n\n"
@@ -1032,6 +1041,72 @@ def build_role_identity_game_roleplay_prompt() -> str:
     )
 
 
+def build_tone_and_style_guidance_prompt(tone_ane_style_name: str = "default") -> str:
+    """
+    根据 tone_ane_style_name 返回对应的语气与风格指导说明文本。
+    支持（大小写与部分同义别名不敏感）：
+      - 'default' / '' : 返回空字符串（不附加额外风格指导）
+      - 'serious' / '严肃' / '严肃谨慎' : 严肃谨慎风格指导
+    未匹配到已知名称时返回空字符串，方便上层按需拼接。
+    若后续需要扩展新的风格，只需在 styles 字典中新增条目即可。
+    """
+    serious = (
+        "### Tone and Style Guidance\n\n"
+        "\n\n"
+        "#### 全局优先级与冲突规则（前置，约束注意力）  \n"
+        "- 优先级顺序：安全/法律/平台策略 > 事实准确性与可验证性 > 明确指令遵循 > 风格偏好。  \n"
+        "- 冲突处理：  \n"
+        "  - 若「证据/引用严格度\\(9\\)」与「冗长度\\(3\\)」冲突：保留≤3行核心结论；把来源折叠为行末 \\[#\\] 短链接（≤3条）。  \n"
+        "  - 若「不确定性披露\\(8\\)」与「冗长度\\(3\\)」冲突：用定性等级+粗粒度区间（低/中/高，对应约50/70/90%），最多1行。  \n"
+        "  - 若信息缺失会影响正确性：最多提出1个关键澄清问题；未获答复时，显式列出假设后继续。  \n"
+        "- 引用与反事实约束：  \n"
+        "  - 严禁编造来源/引文/数据。无法提供可验证来源时，标注 \\[source needed\\] 或给出检索式（关键词+运算符）。  \n"
+        "  - 优先一手或权威二手来源；使用裸链接或DOI；避免不可访问的付费墙摘要。  \n"
+        "- 微结构不视为“结构化=高”。  \n"
+        "\n\n"
+        "# 你的对话风格  \n"
+        "\n\n"
+        "量表统一为0–5离散档（默认中位值2或3，便于用户微调1–2档即可感知差异）。  \n"
+        "\n\n"
+        "对话风格遵循 = {  \n"
+        "  肯定/阿谀强度=0[ 从不恭维，只做事实性确认 ]；  \n"
+        "  反驳/挑战力度=5[ 系统性质询前提，并提供替代框架 ];  \n"
+        "  冗长度/简洁度=1[ 简短要点+一句说明 ];  \n"
+        "  直接性vs委婉度=5[ 直截了当，少情绪修饰 ];  \n"
+        "  情绪共情/情感验证=0[ 冷静中立，无情感表达 ];  \n"
+        "  热情/能量=0[ 平实，无情绪波动 ];  \n"
+        "  道歉频率=0[ 仅在必要时致歉 ];  \n"
+        "  不确定性披露=5[ 系统性标注假设、边界与置信区间 ];  \n"
+        "  证据/引用严格度=5[ 为新的、可检验的事实断言给来源；无法提供则显式标注\\[source needed\\]；不得编造 ];  \n"
+        "  批评直白度=5[ 直接指出错误/不佳做法，不加修饰 ];  \n"
+        "  创造性vs严谨性=2[ 适度发散，严格对齐事实 ];  \n"
+        "  技术深度/行话密度=2[ 专业但尽量通俗 ];  \n"
+        "  结构化程度=0[ 自由叙述 ];  \n"
+        "  主动性/代办倾向=1[ 在简单任务上少量预判 ];  \n"
+        "  澄清提问密度=1[ 很少追问 ];  \n"
+        "  风险规避/安全保守度=0[ 在不违反平台/法律/安全策略前提下大胆建议；若冲突则以策略优先并说明原因 ];  \n"
+        "  个性化/人设浓度=0[ 纯工具，无人设 ];  \n"
+        "  赞美/表扬配额=0[ 不主动表扬 ];  \n"
+        "  变更范围控制=0[ 仅在指明的局部改动 ]；  \n"
+        "  服从提示vs质疑提示=1[ 轻微纠正用户误解 ]；  \n"
+        "}  \n"
+        "\n\n"
+        "# 代码改动模式（变更范围控制）  \n"
+        "- 默认最小补丁；使用 unified diff（`---/+++ @@`），仅包含改动行与必要上下文，不重贴未变更段。  \n"
+        "- 若未指明文件/函数/范围：先询问1个界定范围的问题；若继续被要求直接给出，则提供“拟议补丁”并标注「TODO: 需确认文件/范围」。  \n"
+    )
+
+    styles = {
+        "default": "",
+        "serious": serious,
+        "严肃": serious,
+        "严肃谨慎": serious,
+    }
+
+    key = (tone_ane_style_name or "default").strip().lower()
+    return styles.get(key, styles["default"])
+
+
 # 系统提示词-尾
 def build_system_footer(provider: str, model: str) -> str:
     """构造系统提示页尾信息，包含如何处理文档引用。"""
@@ -1078,11 +1153,13 @@ def build_author_note(provider: str, model: str) -> str:
         "---  \n"
         "\n\n"
         "**提醒**  \n"
-        "1. 回复前应回顾行为规范和角色身份  \n"
-        "2. 工具调用前回顾 Tools 和 工具调用的解释性  \n"
-        "3. 严格区分搜索的资料条目索引与资料正文, 对于要引用的资料条目, 必须先尝试阅读资料正文。  \n"
-        "4. 基于资料回答内容前回顾 你应该如何引用文档来使得回复可信。无法找到来源时明确写“暂无来源（置信度=高/中/低）”，禁止虚构引用。  \n"
-        "5. 你需要思行一致，不要行动结果脱离思考，想一套做却成了另一套，保证你的思考与行动是一致的。  \n"
+        "1. 回顾当前时间  \n"
+        "2. 回复前应回顾 你当前角色的行为规范和角色身份  \n"
+        "3. 回复前应回顾 你的Tone and Style  \n"
+        "4. 工具调用前回顾 Tools 和 工具调用的解释性  \n"
+        "5. 严格区分搜索的资料条目索引与资料正文, 对于要引用的资料条目, 必须先尝试阅读资料正文。  \n"
+        "6. 基于资料回答内容前回顾 你应该如何引用文档来使得回复可信。无法找到来源时明确写“暂无来源（置信度=高/中/低）”，禁止虚构引用。  \n"
+        "7. 你需要思行一致，不要行动结果脱离思考，想一套做却成了另一套，保证你的思考与行动是一致的。  \n"
         f"{think_injector}"
     )
 
@@ -1159,7 +1236,7 @@ if not getattr(urllib.request, "_llm_retry_patched", False):
                     _retry_sleep(attempt)
                     continue
                 raise
-            except urllib.error.URLError as ue:
+            except urllib.error.URLError:
                 # 常见临时网络错误：超时 / DNS / 连接重置
                 if attempt < _HTTP_MAX_RETRIES - 1:
                     _retry_sleep(attempt)
@@ -1216,6 +1293,7 @@ class DeepSeekClient:
             "model": model,
             "messages": messages,
             "stream": False,
+            "max_token": (8 * 1_024),
         }
         if extra:
             payload.update({k: v for k, v in extra.items() if v is not None})
@@ -1244,6 +1322,7 @@ class DeepSeekClient:
             "model": model,
             "messages": messages,
             "stream": True,
+            "max_token": (8 * 1_024),
         }
         if extra:
             payload.update({k: v for k, v in extra.items() if v is not None})
@@ -3071,6 +3150,9 @@ def build_tools_description(
         lines.append(
             "  commentary?: string, // optional; 调用意图/思考说明，仅用于向用户展示，提高可解释性，不会传入工具"
         )
+        lines.append(
+            "  request_sig: string, // required; 外部自签文本；与后端生成的随机段组合为 request_id，不会传入工具实现"
+        )
         lines.append("}) => any;")
         lines.append("")
 
@@ -3235,8 +3317,10 @@ def build_antml_results(results: List[Dict[str, str]]) -> str:
     for r in results:
         name = r.get("name", "")
         out = r.get("output", "")
+        rid = r.get("request_id", "")
+        attr = f' name="{name}"' + (f' request_id="{rid}"' if rid else "")
         parts.append(
-            f'  <antml:result name="{name}"><![CDATA[\n{out}\n]]></antml:result>'
+            f'  <antml:result{attr}><![CDATA[\n{out}\n]]></antml:result>'
         )
     parts.append("</antml:function_results>")
     return "\n".join(parts)
@@ -3275,6 +3359,24 @@ def execute_tools(calls: List[Dict[str, Any]]) -> List[Dict[str, str]]:
             sig = inspect.signature(fn)
             # 只保留签名中存在的键
             accepted = {k: v for k, v in params_dict.items() if k in sig.parameters}
+            # 要求外部提供自签文本 request_sig，并与 gen_id() 组合成 request_id
+            sig_text_raw = (params_dict.get("request_sig") or "").strip()
+            if not sig_text_raw:
+                results.append({"name": name, "output": "ERROR: missing request_sig"})
+                continue
+            try:
+                def _sanitize_id_component(x: str) -> str:
+                    b = x.encode("utf-8", errors="ignore")
+                    s = base64.urlsafe_b64encode(b).decode("ascii").rstrip("=")
+                    return s[:64] if len(s) > 64 else (s or "x")
+                part_a = _sanitize_id_component(sig_text_raw)
+                part_b = gen_id()
+                rid = f"{part_a}.{part_b}"
+            except Exception:
+                rid = f"{sig_text_raw}.{gen_id()}"
+            # 仅当底层工具签名包含 request_id 时才注入，避免意外关键字参数错误
+            if "request_id" in sig.parameters and "request_id" not in accepted:
+                accepted["request_id"] = rid
             # 检查缺少的必填参数
             required = [
                 n
@@ -3288,7 +3390,7 @@ def execute_tools(calls: List[Dict[str, Any]]) -> List[Dict[str, str]]:
                 continue
             out = fn(**accepted)
             results.append(
-                {"name": name, "output": out if isinstance(out, str) else str(out)}
+                {"name": name, "request_id": rid, "output": out if isinstance(out, str) else str(out)}
             )
         except Exception as e:
             results.append({"name": name, "output": f"ERROR: {e}"})
@@ -3499,6 +3601,36 @@ except Exception:
 
 _FASTMCP_CLIENT: Optional[Any] = None
 _FASTMCP_CLIENT_CONFIG_HASH: Optional[str] = None
+_BG_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_BG_LOOP_THREAD: Optional[threading.Thread] = None
+_BG_LOOP_READY = threading.Event()
+
+
+def _ensure_bg_loop() -> None:
+    global _BG_LOOP, _BG_LOOP_THREAD
+    if _BG_LOOP and _BG_LOOP.is_running():
+        return
+
+    def _loop_thread():
+        loop = asyncio.new_event_loop()
+        global _BG_LOOP
+        _BG_LOOP = loop
+        _BG_LOOP_READY.set()
+        loop.run_forever()
+
+    _BG_LOOP_READY.clear()
+    _BG_LOOP_THREAD = threading.Thread(
+        target=_loop_thread, name="mcp-bg-loop", daemon=True
+    )
+    _BG_LOOP_THREAD.start()
+    _BG_LOOP_READY.wait(timeout=5)
+
+
+def _bg_submit(coro: "asyncio.Future[Any] | asyncio.coroutines") -> Any:
+    _ensure_bg_loop()
+    assert _BG_LOOP is not None
+    fut = asyncio.run_coroutine_threadsafe(coro, _BG_LOOP)
+    return fut.result()
 
 
 def _hash_obj(o: Any) -> str:
@@ -3629,24 +3761,141 @@ def _run_async(coro):
         raise RuntimeError(f"_run_async failed: {e}")
 
 
-def _ensure_fastmcp_client(force_recreate: bool = False) -> Optional[Any]:
-    global _FASTMCP_CLIENT, _FASTMCP_CLIENT_CONFIG_HASH
-    if _FastMCPClient is None:
-        return None
-    cfg = _build_fastmcp_config()
-    h = _hash_obj(cfg)
-    if (not force_recreate) and _FASTMCP_CLIENT and h == _FASTMCP_CLIENT_CONFIG_HASH:
-        return _FASTMCP_CLIENT
-    # 关闭旧 client（如已存在）
-    if _FASTMCP_CLIENT:
+class MCPSessionManager:
+    """管理 FastMCP Client 的长期会话"""
+
+    def __init__(self):
+        # 持久会话：不再依赖短暂 asyncio.run 循环；使用后台线程事件循环保持打开
+        self.client: Optional[Any] = None
+        self.config_hash: Optional[str] = None
+        self._lock = threading.Lock()
+
+    # 兼容旧异步调用点：返回已就绪的 client（内部同步实现）
+    async def ensure_session(self, cfg: Dict[str, Any]) -> Any:
+        return self.ensure_session_sync(cfg)
+
+    def ensure_session_sync(self, cfg: Dict[str, Any]) -> Any:
+        if _FastMCPClient is None:
+            raise RuntimeError("fastmcp not installed")
+        h = _hash_obj(cfg)
+        with self._lock:
+            if self.client and self.config_hash == h:
+                return self.client
+            # 需要重建
+            self._close_client_sync()
+            self.client = self._open_client_sync(cfg)
+            self.config_hash = h
+            return self.client
+
+    def _open_client_sync(self, cfg: Dict[str, Any]) -> Any:
+        async def _open():
+            c = _FastMCPClient(cfg)
+            # 等价于 async with 进入，但保持会话常驻；退出时再 __aexit__
+            await c.__aenter__()
+            return c
+
+        return _bg_submit(_open())
+
+    def _close_client_sync(self) -> None:
+        if not self.client:
+            return
+
+        c = self.client
+
+        async def _close():
+            try:
+                await c.__aexit__(None, None, None)
+            except Exception:
+                pass
+
         try:
-            # 尝试优雅关闭
-            _run_async(_FASTMCP_CLIENT.close())  # type: ignore
+            _bg_submit(_close())
         except Exception:
             pass
-    _FASTMCP_CLIENT = _FastMCPClient(cfg)
-    _FASTMCP_CLIENT_CONFIG_HASH = h
-    return _FASTMCP_CLIENT
+        self.client = None
+        self.config_hash = None
+
+    async def _stop_session(self):
+        # 兼容旧调用路径（_ensure_fastmcp_client(force_recreate=True)）
+        self._close_client_sync()
+
+    # 提供强制重建（外部可调用）
+    def force_recreate(self):
+        with self._lock:
+            self._close_client_sync()
+
+
+# 全局会话管理器
+_MCP_SESSION_MANAGER = MCPSessionManager()
+
+
+def _ensure_fastmcp_client(force_recreate: bool = False) -> None:
+    """
+    Legacy 兼容函数：
+    旧版本维护一个全局 fastmcp 客户端；当前架构改为 MCPSessionManager 会话管理。
+    该函数保留以避免外部/本文件旧调用报错。
+    force_recreate=True 时：主动终止现有会话，下一次调用会按最新配置重建。
+    未安装 fastmcp 时静默返回。
+    """
+    if _FastMCPClient is None:
+        return
+    if force_recreate:
+        try:
+
+            async def _stop():
+                # 直接调用内部停止逻辑（安全包裹）
+                try:
+                    await _MCP_SESSION_MANAGER._stop_session()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+
+            _run_async(_stop())
+        except Exception:
+            pass
+
+
+def _with_auto_reconnect(run_coro_factory, max_retries: int = 1):
+    """
+    run_coro_factory: lambda client -> awaitable (协程对象)
+    逻辑：
+      1. 使用当前（或新建）client 执行
+      2. 失败且判定为连接类错误 -> 强制重建 client 再重试，最多 max_retries 次
+    返回：协程执行结果；若最终失败抛出原异常
+    """
+
+    def _is_conn_error(exc: BaseException) -> bool:
+        txt = repr(exc).lower()
+        # 根据常见 IO/管道/连接断开关键词粗判
+        if "timeout" in txt or "timed out" in txt or "deadline" in txt:
+            return True
+        keys = [
+            "broken",
+            "closed",
+            "reset",
+            "eof",
+            "pipe",
+            "connection",
+            "transport",
+            "hangup",
+            "sigpipe",
+            "abort",
+            "unreachable",
+        ]
+        return any(k in txt for k in keys)
+
+    cfg = _build_fastmcp_config()
+    attempt = 0
+    while True:
+        attempt += 1
+        client = _MCP_SESSION_MANAGER.ensure_session_sync(cfg)
+        try:
+            return _bg_submit(run_coro_factory(client))
+        except Exception as e:
+            if attempt > max_retries or not _is_conn_error(e):
+                raise
+            # 连接类错误且还有重试次数：强制重建后继续
+            _MCP_SESSION_MANAGER.force_recreate()
+            continue
 
 
 def register_mcp_server(
@@ -3738,90 +3987,69 @@ def mcp_call(
     except Exception as e:
         return f"ERROR: invalid-json: {e}"
 
-    cfg = _build_fastmcp_config()  # 每次读取最新配置，支持动态修改
+    try:
 
-    async def _run():
-        client = _FastMCPClient(cfg)  # 每次调用创建新实例，避免复用已关闭连接
-        try:
-            async with client:
-                try:
-                    tools = await client.list_tools()
-                except Exception as e:
-                    return f"ERROR: list-tools-failed: {e}"
+        def _invoke(client):
+            async def _inner():
+                tools = await client.list_tools()
                 names = {t.name for t in tools}
                 candidate = f"{server}_{tool}"
                 actual = candidate if candidate in names else tool
                 if actual not in names:
-                    return f"ERROR: tool-not-found ({tool})"
-                try:
-                    result = await client.call_tool(
-                        actual, params, timeout=timeout_override
-                    )
-                except Exception as e:
-                    return f"ERROR: call-failed: {e}"
+                    raise RuntimeError(f"tool-not-found ({tool})")
+                result = await client.call_tool(
+                    actual, params, timeout=timeout_override
+                )
+                return result, actual
 
-                # 兼容 fastmcp 返回：没有 result.text；需要从 content(list[TextContent]) 聚合
-                def _extract_text(r) -> str:
-                    texts = []
-                    for blk in getattr(r, "content", []) or []:
-                        # mcp.types.TextContent: 有属性 type='text' 与 text
-                        if getattr(blk, "type", None) == "text":
-                            t = getattr(blk, "text", None)
-                            if isinstance(t, str) and t.strip():
-                                texts.append(t.rstrip())
-                    return "\n".join(texts).strip()
+            return _inner()
 
-                aggregated_text = _extract_text(result)
-                data = getattr(result, "data", None)
-                structured_content = getattr(result, "structured_content", None)
+        result, actual = _with_auto_reconnect(_invoke, max_retries=1)
 
-                if raw:
-                    try:
-                        return json.dumps(
-                            {
-                                "name": actual,
-                                "is_error": getattr(result, "is_error", False),
-                                "data": data,
-                                "structured_content": structured_content,
-                                "content_text": aggregated_text or None,
-                                "content_len": len(
-                                    getattr(result, "content", []) or []
-                                ),
-                            },
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    except Exception:
-                        # 退化：尽量仍返回可读信息
-                        return aggregated_text or str(data) or str(result)
+        # 文本抽取
+        def _extract_text(r) -> str:
+            texts = []
+            for blk in getattr(r, "content", []) or []:
+                if getattr(blk, "type", None) == "text":
+                    t = getattr(blk, "text", None)
+                    if isinstance(t, str) and t.strip():
+                        texts.append(t.rstrip())
+            return "\n".join(texts).strip()
 
-                # 优先返回聚合文本；否则序列化 data / structured_content
-                if aggregated_text:
-                    return aggregated_text
-                # 若有 data（结构化解析结果）则输出 JSON
-                if data is not None:
-                    try:
-                        return json.dumps(data, ensure_ascii=False)
-                    except Exception:
-                        return str(data)
-                # 退化到 structured_content
-                if structured_content is not None:
-                    try:
-                        return json.dumps(structured_content, ensure_ascii=False)
-                    except Exception:
-                        return str(structured_content)
-                # 最后兜底：原始 repr
-                return str(result)
-        except Exception as e:
-            return f"ERROR: client-context: {e}"
-
-    out = _run_async(_run())
-    if hasattr(out, "result"):
-        try:
-            return out.result()  # type: ignore
-        except Exception as e:
-            return f"ERROR: {e}"
-    return out  # 已是字符串
+        aggregated_text = _extract_text(result)
+        data = getattr(result, "data", None)
+        structured_content = getattr(result, "structured_content", None)
+        if raw:
+            try:
+                return json.dumps(
+                    {
+                        "name": actual,
+                        "is_error": getattr(result, "is_error", False),
+                        "data": data,
+                        "structured_content": structured_content,
+                        "content_text": aggregated_text or None,
+                        "content_len": len(getattr(result, "content", []) or []),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            except Exception:
+                return aggregated_text or str(data) or str(result)
+        if aggregated_text:
+            return aggregated_text
+        if data is not None:
+            try:
+                return json.dumps(data, ensure_ascii=False)
+            except Exception:
+                return str(data)
+        if structured_content is not None:
+            try:
+                return json.dumps(structured_content, ensure_ascii=False)
+            except Exception:
+                return str(structured_content)
+        return str(result)
+    except Exception as e:
+        return f"ERROR: client-context: {e}"  # 已是字符串
 
 
 def list_registered_mcp_capabilities(
@@ -3836,111 +4064,92 @@ def list_registered_mcp_capabilities(
         print(msg)
         return msg
 
-    cfg = _build_fastmcp_config()
+    try:
+        # 自动重连包装 list_tools
+        def _list(client):
+            async def _inner():
+                return await client.list_tools()
 
-    async def _run():
-        client = _FastMCPClient(cfg)
-        try:
-            async with client:
-                try:
-                    tools = await client.list_tools()
-                except Exception as e:
-                    err = {"error": f"list-tools-failed: {e}"}
-                    print(json.dumps(err, ensure_ascii=False))
-                    return err
+            return _inner()
 
-                def _schema_dict(s: Any) -> Dict[str, Any]:
-                    if s is None:
-                        return {}
-                    if isinstance(s, dict):
-                        return s
-                    # 兼容 pydantic / dataclass 等多种形式
-                    for attr in ("model_json_schema", "schema", "to_dict"):
-                        if hasattr(s, attr):
-                            try:
-                                fn = getattr(s, attr)
-                                data = fn() if callable(fn) else fn
-                                if isinstance(data, dict):
-                                    return data
-                            except Exception:
-                                pass
-                    return {}
+        tools = _with_auto_reconnect(_list, max_retries=1)
 
-                items = []
-                for t in tools:
-                    name = getattr(t, "name", None)
-                    if not name:
-                        continue
-                    desc = getattr(t, "description", "") or ""
-                    if server and not name.startswith(f"{server}_"):
-                        continue
-                    schema = None
-                    # fastmcp Tool 通常为 input_schema; 做多名称兜底
-                    for attr in ("input_schema", "inputSchema", "schema"):
-                        if hasattr(t, attr):
-                            schema = getattr(t, attr)
-                            if schema is not None:
-                                break
-                    sd = _schema_dict(schema)
-                    props = sd.get("properties") if isinstance(sd, dict) else None
-                    required = (
-                        set(sd.get("required") or []) if isinstance(sd, dict) else set()
+        def _schema_dict(s: Any) -> Dict[str, Any]:
+            if s is None:
+                return {}
+            if isinstance(s, dict):
+                return s
+            for attr in ("model_json_schema", "schema", "to_dict"):
+                if hasattr(s, attr):
+                    try:
+                        fn = getattr(s, attr)
+                        data = fn() if callable(fn) else fn
+                        if isinstance(data, dict):
+                            return data
+                    except Exception:
+                        pass
+            return {}
+
+        items = []
+        for t in tools:
+            name = getattr(t, "name", None)
+            if not name:
+                continue
+            desc = getattr(t, "description", "") or ""
+            if server and not name.startswith(f"{server}_"):
+                continue
+            schema = None
+            for attr in ("input_schema", "inputSchema", "schema"):
+                if hasattr(t, attr):
+                    schema = getattr(t, attr)
+                    if schema is not None:
+                        break
+            sd = _schema_dict(schema)
+            props = sd.get("properties") if isinstance(sd, dict) else None
+            required = set(sd.get("required") or []) if isinstance(sd, dict) else set()
+            params_list = []
+            if isinstance(props, dict):
+                for p_name, meta in props.items():
+                    if not isinstance(meta, dict):
+                        meta = {}
+                    p_type = meta.get("type") or "string"
+                    p_desc = meta.get("description") or ""
+                    params_list.append(
+                        {
+                            "name": p_name,
+                            "type": p_type,
+                            "required": p_name in required,
+                            "description": p_desc,
+                        }
                     )
-                    params_list = []
-                    if isinstance(props, dict):
-                        for p_name, meta in props.items():
-                            if not isinstance(meta, dict):
-                                meta = {}
-                            p_type = meta.get("type") or "string"
-                            p_desc = meta.get("description") or ""
-                            params_list.append(
-                                {
-                                    "name": p_name,
-                                    "type": p_type,
-                                    "required": p_name in required,
-                                    "description": p_desc,
-                                }
-                            )
-                    item = {"name": name, "description": desc}
-                    if params_list:
-                        item["params"] = params_list  # 扩展字段（向后兼容：旧代码忽略）
-                    items.append(item)
-
-                if json_mode:
-                    print(json.dumps(items, ensure_ascii=False, indent=2))
-                else:
-                    lines = [
-                        f"[tools] count={len(items)}"
-                        + (f" (filtered by server={server})" if server else "")
-                    ]
-                    for it in items:
-                        lines.append(f"  - {it['name']}: {it['description'][:60]}")
-                        # 增加参数行
-                        for p in it.get("params", []):
-                            rflag = "*" if p.get("required") else ""
-                            # 安全获取首行描述：可能为空导致 splitlines() 结果为空列表
-                            _raw_desc = p.get("description") or ""
-                            _desc_lines = _raw_desc.splitlines()
-                            p_desc = _desc_lines[0] if _desc_lines else ""
-                            if len(p_desc) > 60:
-                                p_desc = p_desc[:57] + "..."
-                            lines.append(
-                                f"      * {p['name']}{rflag} <{p.get('type','')}>: {p_desc}"
-                            )
-                    print("\n".join(lines))
-                return items
-        except Exception as e:
-            err = {"error": f"client-context: {e}"}
-            print(json.dumps(err, ensure_ascii=False))
-            return err
-
-    out = _run_async(_run())
-    if hasattr(out, "result"):
-        try:
-            _ = out.result()  # type: ignore
-        except Exception:
-            pass
-    return ""  # 兼容旧签名不依赖返回值
+            item = {"name": name, "description": desc}
+            if params_list:
+                item["params"] = params_list
+            items.append(item)
+        if json_mode:
+            print(json.dumps(items, ensure_ascii=False, indent=2))
+        else:
+            lines = [
+                f"[tools] count={len(items)}"
+                + (f" (filtered by server={server})" if server else "")
+            ]
+            for it in items:
+                lines.append(f"  - {it['name']}: {it['description'][:60]}")
+                for p in it.get("params", []):
+                    rflag = "*" if p.get("required") else ""
+                    _raw_desc = p.get("description") or ""
+                    _desc_lines = _raw_desc.splitlines()
+                    p_desc = _desc_lines[0] if _desc_lines else ""
+                    if len(p_desc) > 60:
+                        p_desc = p_desc[:57] + "..."
+                    lines.append(
+                        f"      * {p['name']}{rflag} <{p.get('type','')}>: {p_desc}"
+                    )
+            print("\n".join(lines))
+    except Exception as e:
+        err = {"error": f"client-context: {e}"}
+        print(json.dumps(err, ensure_ascii=False))
+    return ""
 
 
 #
@@ -4076,7 +4285,8 @@ def tool__human__input(
         try:
             from prompt_toolkit.application import Application
             from prompt_toolkit.document import Document
-            from prompt_toolkit.filters import Condition
+
+            # from prompt_toolkit.filters import Condition
             from prompt_toolkit.key_binding import KeyBindings
             from prompt_toolkit.layout import HSplit, Layout
             from prompt_toolkit.styles import Style
@@ -4640,6 +4850,7 @@ def interactive_invoke(
     role: str = "default",
     stream: bool = False,
     theme: str = "auto",
+    tone_ane_style_name: str = "default",
 ) -> None:
     """在终端进入多轮对话模式，支持 XML 工具调用。输入 /exit 退出。
     使用 prompt_toolkit 获得更好的中文输入与历史/补全体验，并用 rich 美化输出。
@@ -4724,7 +4935,7 @@ def interactive_invoke(
     REASONING_BORDER = _pal["REASONING_BORDER"]
     REASONING_PANEL_STYLE = _pal["REASONING_PANEL_STYLE"]
     WELCOME_COLOR = _pal["WELCOME_COLOR"]
-    MAX_CONTEXT_TOKENS = 65536  # DeepSeek 64k 上限
+    MAX_CONTEXT_TOKENS = 1024 * 128  # DeepSeek 128k 上限
 
     # === 流式输出用动态 Panel 盒子 ===
     class _StreamPanels:
@@ -5019,7 +5230,7 @@ def interactive_invoke(
     conversation_terminated: bool = False
 
     tools_desc = get_tools_description()
-    guidance = (
+    tools_guidance = (
         "\n\n"
         "当需要使用工具时，请严格按照以下 ANTML (Anthropic Tool Markup Language) 格式输出：  \n"
         "<antml:function_calls>  \n"
@@ -5069,12 +5280,16 @@ def interactive_invoke(
     # 新增：在 header 与 effective_system 之间插入用户 Bio Markdown
     bio_md = build_user_bio_markdown()
     header = build_system_header(provider=provider, model=model)
+    tone_and_style_guidance = build_tone_and_style_guidance_prompt(
+        tone_ane_style_name=tone_ane_style_name
+    )
     footer = build_system_footer(provider=provider, model=model)
     parts: List[str] = [header]
     if bio_md.strip():
         parts.append("")
         parts.append(bio_md)
-    parts.extend(["", effective_system, "", tools_desc, "", guidance])
+    parts.extend(["", effective_system, "", tools_desc, "", tools_guidance])
+    parts.extend(["", tone_and_style_guidance, ""])
     parts.extend(["", footer])
     system_full = "\n".join(parts)
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_full}]
@@ -5138,6 +5353,8 @@ def interactive_invoke(
                 "/model",
                 ":role",
                 "/role",
+                ":tone",
+                "/tone",
                 "/block",
                 "/blockend",
             ],
@@ -5787,7 +6004,7 @@ def interactive_invoke(
             # 若安全终止已触发，直接结束本轮并不再输出后续助手内容
             if conversation_terminated:
                 return
-            
+
             # 在助手 panel 下展示上下文窗口用量
             _print_token_usage(latest_usage, elapsed_sec=latest_elapsed)
             messages.append({"role": "assistant", "content": assistant})
@@ -6001,8 +6218,9 @@ def interactive_invoke(
                     parts_list.append("")
                     parts_list.append(bio_md)
                 parts_list.extend(
-                    ["", new_effective_system, "", tools_desc, "", guidance]
+                    ["", new_effective_system, "", tools_desc, "", tools_guidance]
                 )
+                parts_list.extend(["", tone_and_style_guidance, ""])
                 parts_list.extend(["", footer])
                 system_full = "\n".join(parts_list)
 
@@ -6023,6 +6241,88 @@ def interactive_invoke(
                         len(turns) + 1,
                         "system",
                         f"[switch-role] {canonical_role}",
+                    )
+                except Exception:
+                    pass
+                continue
+
+            if user_in.startswith("/tone") or user_in.startswith(":tone"):
+                parts = user_in.split(maxsplit=1)
+                # 无参数或帮助：展示当前 tone 与用法
+                if len(parts) == 1 or parts[1] in {"?", "help", "-h", "--help"}:
+                    try:
+                        console.print(
+                            Panel(
+                                f"当前 tone/style: {tone_ane_style_name}\n用法: /tone <name>\n示例: /tone serious  或  /tone default",
+                                border_style=WEAK_BORDER,
+                                style=WEAK_STYLE,
+                            )
+                        )  # type: ignore
+                    except Exception:
+                        print(
+                            f"当前 tone/style: {tone_ane_style_name}\n用法: /tone <name>\n示例: /tone serious  或  /tone default"
+                        )
+                    continue
+                new_tone_raw = (parts[1] or "").strip()
+                if not new_tone_raw:
+                    try:
+                        console.print(Panel("用法: /tone <name>", border_style=WEAK_BORDER, style=WEAK_STYLE))  # type: ignore
+                    except Exception:
+                        print("用法: /tone <name>")
+                    continue
+                # 生成新的 tone/style 指南
+                new_guidance = build_tone_and_style_guidance_prompt(
+                    tone_ane_style_name=new_tone_raw
+                )
+                tone_ane_style_name = new_tone_raw  # 更新当前名称
+                tone_and_style_guidance = new_guidance  # 更新指南文本
+                # 重新计算有效角色系统提示（若用户自定义 system_prompt 则保持不变）
+                effective_system_current = (
+                    (
+                        build_role_identity_deep_researcher_prompt()
+                        if canonical_role == "deep_researcher"
+                        else (
+                            build_role_identity_game_roleplay_prompt()
+                            if canonical_role == "game_roleplay"
+                            else build_role_identity_prompt()
+                        )
+                    )
+                    if system_prompt == DEFAULT_SYSTEM_PROMPT
+                    else system_prompt
+                )
+                # 重建 system_full
+                parts_list: List[str] = [header]
+                if bio_md.strip():
+                    parts_list.append("")
+                    parts_list.append(bio_md)
+                parts_list.extend(
+                    [
+                        "",
+                        effective_system_current,
+                        "",
+                        tools_desc,
+                        "",
+                        tools_guidance,
+                    ]
+                )
+                parts_list.extend(["", tone_and_style_guidance, ""])
+                parts_list.extend(["", footer])
+                system_full = "\n".join(parts_list)
+                if messages and messages[0].get("role") == "system":
+                    messages[0]["content"] = system_full
+                else:
+                    messages.insert(0, {"role": "system", "content": system_full})
+                try:
+                    console.print(Panel(f"已切换 tone/style: {tone_ane_style_name}", border_style=WEAK_BORDER, style=WEAK_STYLE))  # type: ignore
+                except Exception:
+                    print(f"已切换 tone/style: {tone_ane_style_name}")
+                # 记录日志
+                try:
+                    chatdb_log_message(
+                        chat_session_uuid,
+                        len(turns) + 1,
+                        "system",
+                        f"[switch-tone] {tone_ane_style_name}",
                     )
                 except Exception:
                     pass
@@ -6226,6 +6526,13 @@ def main() -> None:
         choices=["light", "dark", "auto"],
         default="auto",
         help="交互配色主题（light/dark/auto，亦可用环境变量 TODO_THEME 指定）",
+    )
+    inv.add_argument(
+        "--tone-style",
+        "--tone",
+        dest="tone_ane_style_name",
+        default="default",
+        help="对话语气/风格指导名称（serious / default 等）；interactive 模式下插入相应 tone/style 提示",
     )
 
     mcp_reg = sub.add_parser(
@@ -6725,6 +7032,7 @@ def main() -> None:
                     role=getattr(args, "role", "default"),
                     stream=getattr(args, "stream", False),
                     theme=getattr(args, "theme", "auto"),
+                    tone_ane_style_name=getattr(args, "tone_ane_style_name", "default"),
                 )
             except Exception as e:
                 print(f"Interactive invoke failed: {e}", file=sys.stderr)
