@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TODO 可视化看板 · YAML 驱动</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'Geist', 'Mona Sans', 'IBM Plex Sans', 'Manrope', 'system-ui', 'ui-sans-serif', 'sans-serif']
+                    },
+                    colors: {
+                        brand: {50:'#eef4ff',100:'#e0e7ff',200:'#c7d2fe',300:'#a5b4fc',400:'#818cf8',500:'#6366f1',600:'#4f46e5',700:'#4338ca',800:'#3730a3',900:'#312e81'},
+                        mint: {50:'#e7fff4',100:'#caffea',200:'#9ff7d7',300:'#6ee7bf',400:'#34d399',500:'#10b981'}
+                    },
+                    animation: {
+                        'fade-in': 'fadeIn 0.4s ease-in-out',
+                        'slide-up': 'slideUp 0.3s ease-out',
+                    },
+                    keyframes: {
+                        fadeIn: { '0%': { opacity: '0' }, '100%': { opacity: '1' } },
+                        slideUp: { '0%': { transform: 'translateY(8px)', opacity: '0' }, '100%': { transform: 'translateY(0)', opacity: '1' } }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&family=Manrope:wght@300;400;500;600&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Mona+Sans:wght@300;400;500;600&display=swap" rel="stylesheet" />
+
+    <!-- Icons: Material Symbols, Lucide -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
+    <script type="module">
+        import { createIcons, icons } from 'https://cdn.jsdelivr.net/npm/lucide@latest/+esm';
+        window.__initLucide = () => createIcons({ icons });
+    </script>
+
+    <!-- Motion One -->
+    <script src="https://cdn.jsdelivr.net/npm/@motionone/dom/dist/motion.min.js"></script>
+
+    <!-- js-yaml -->
+    <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
+
+    <style>
+        :root {
+            --bg-grad: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --glass: rgba(255, 255, 255, 0.08);
+        }
+        body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif; background: var(--bg-grad); }
+        .glass { background: var(--glass); backdrop-filter: blur(12px); }
+        .card { background: rgba(255,255,255,0.92); backdrop-filter: blur(8px); }
+        .status-todo { border-left: 4px solid #3b82f6; }
+        .status-in-progress { border-left: 4px solid #f59e0b; }
+        .status-done { border-left: 4px solid #10b981; }
+        .material-symbols-outlined { vertical-align: middle; }
+    </style>
+</head>
+<body class="min-h-screen text-gray-800">
+    <div class="max-w-6xl mx-auto px-4 py-10">
+        <header class="text-center mb-10 animate-fade-in">
+            <h1 class="text-4xl font-bold text-white tracking-tight">📋 TODO 可视化看板</h1>
+            <p class="text-white/80 mt-3">YAML 驱动 · Tailwind · Radix 风格 · Motion 动画</p>
+        </header>
+
+        <section class="glass rounded-2xl p-5 shadow-xl mb-6 animate-slide-up">
+            <div class="flex flex-col md:flex-row md:items-center gap-3">
+                <div class="flex-1">
+                    <label class="sr-only" for="q">搜索</label>
+                    <div class="relative">
+                        <span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">search</span>
+                        <input id="q" type="text" placeholder="搜索标题 / 笔记 / 标签…" class="w-full pl-11 pr-4 py-2.5 rounded-xl bg-white/90 border border-white/50 focus:outline-none focus:ring-2 focus:ring-brand-400" />
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 md:flex gap-3">
+                    <select id="status" class="px-3 py-2.5 rounded-xl bg-white/90 border border-white/50 focus:outline-none focus:ring-2 focus:ring-brand-400">
+                        <option value="">所有状态</option>
+                        <option value="todo">待办</option>
+                        <option value="in-progress">进行中</option>
+                        <option value="done">已完成</option>
+                    </select>
+                    <select id="project" class="px-3 py-2.5 rounded-xl bg-white/90 border border-white/50 focus:outline-none focus:ring-2 focus:ring-brand-400">
+                        <option value="">所有项目</option>
+                    </select>
+                    <select id="tag" class="px-3 py-2.5 rounded-xl bg-white/90 border border-white/50 focus:outline-none focus:ring-2 focus:ring-brand-400">
+                        <option value="">所有标签</option>
+                    </select>
+                    <button id="resetFilters" class="px-4 py-2.5 rounded-xl bg-brand-600 text-white hover:bg-brand-700 transition">重置</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+            <div class="glass rounded-2xl p-5 text-white">
+                <div class="flex items-center gap-3">
+                    <span class="material-symbols-outlined">list_alt</span>
+                    <div>
+                        <div class="text-2xl font-semibold" id="stat-total">0</div>
+                        <div class="text-white/80 text-sm">总任务数</div>
+                    </div>
+                </div>
+            </div>
+            <div class="glass rounded-2xl p-5 text-white">
+                <div class="flex items-center gap-3">
+                    <span class="material-symbols-outlined">progress_activity</span>
+                    <div>
+                        <div class="text-2xl font-semibold" id="stat-inprogress">0</div>
+                        <div class="text-white/80 text-sm">进行中</div>
+                    </div>
+                </div>
+            </div>
+            <div class="glass rounded-2xl p-5 text-white">
+                <div class="flex items-center gap-3">
+                    <span class="material-symbols-outlined">today</span>
+                    <div>
+                        <div class="text-2xl font-semibold" id="stat-today">0</div>
+                        <div class="text-white/80 text-sm">今日任务</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="content" class="space-y-6"></section>
+
+        <details class="glass rounded-2xl p-5 mt-8">
+            <summary class="cursor-pointer text-white/90 mb-3">高级 · 查看/替换 YAML 数据</summary>
+            <div class="space-y-3">
+                <textarea id="yamlInput" class="w-full min-h-[220px] rounded-xl p-4 bg-white/90 border border-white/50 focus:outline-none focus:ring-2 focus:ring-brand-400 text-sm"></textarea>
+                <div class="flex items-center gap-3">
+                    <button id="applyYaml" class="px-4 py-2.5 rounded-xl bg-mint-500 text-white hover:brightness-95 transition">应用 YAML</button>
+                    <button id="restoreYaml" class="px-4 py-2.5 rounded-xl bg-white/90 border border-white/50 hover:bg-white transition">还原初始数据</button>
+                    <a id="downloadYaml" class="px-4 py-2.5 rounded-xl bg-brand-600 text-white hover:bg-brand-700 transition" download="todos.yaml">下载当前 YAML</a>
+                </div>
+            </div>
+        </details>
+
+        <!-- 数据源配置（本地文件） -->
+        <details class="glass rounded-2xl p-5 mt-4">
+            <summary class="cursor-pointer text-white/90 mb-3">数据源 · 本地文件</summary>
+            <div class="space-y-3 text-white/90">
+                <div class="grid md:grid-cols-4 gap-3 items-center">
+                    <label for="localFilePath" class="md:col-span-1">本地文件路径：</label>
+                    <input id="localFilePath" type="text" value="~/llm_todo_chat.txt" placeholder="~/llm_todo_chat.txt" class="md:col-span-2 text-gray-800 bg-white/90 rounded-xl px-3 py-2" />
+                    <button id="loadFromPath" class="md:col-span-1 px-4 py-2 rounded-xl bg-mint-500 text-white hover:brightness-95 transition">自动加载</button>
+                </div>
+                <div class="grid md:grid-cols-4 gap-3 items-center">
+                    <label for="yamlFile" class="md:col-span-1">或选择文件：</label>
+                    <input id="yamlFile" type="file" accept=".yml,.yaml,.txt,text/yaml,text/plain" class="md:col-span-2 text-white/80 bg-white/90 rounded-xl px-3 py-2" />
+                    <div class="md:col-span-1 text-sm">当前数据来源：<span id="currentSource" class="font-medium">内嵌</span></div>
+                </div>
+                <p class="text-xs text-white/70">提示：
+                    支持 .yaml, .yml, .txt 格式。页面加载时会自动尝试从指定路径读取文件。
+                    <br>• 相对路径（如 ./data.txt）：相对于当前网页位置
+                    <br>• 绝对路径：需要是可通过 HTTP 访问的文件
+                    <br>• 用户目录路径（如 ~/file.txt）：由于浏览器安全限制，需手动选择文件
+                    <br>• 加载失败时会自动回退到内嵌的案例数据
+                </p>
+            </div>
+        </details>
+    </div>
+
+    <!-- 初始 YAML 数据（来自你的输入） -->
+                <script type="application/yaml" id="todo-yaml">
+---
+date: '2025-08-23'
+tasks:
+  - id: 20250823003829-f80c0c
+    time: '18:00'
+    title: 发布DeepSeek V3.1的小红书笔记
+    notes: ''
+    status: todo
+    project: null
+    tags: []
+---
+date: '2025-08-22'
+tasks:
+  - id: 20250822211025-ba9a84
+    time: null
+    title: 确定性AI实现技术研究：约束采样、验证器集成与混合系统架构
+    notes: |-
+      研究内容包括：确定性AI实现技术（约束采样、验证器集成）、混合系统架构（确定性与概率性组件协同）、具体案例研究。需要提供相关技术文档检索路径。
+
+      [2025-08-22T22:01:11.956632] 【研究进展更新 - 2025-08-22】
+
+      ✅ 已完成工作：
+
+      1. 深度研究了约束采样技术（ApproxMC、UniGen算法）
+
+      2. 分析了验证器集成机制和混合系统架构
+
+      3. 收集了多个实际案例研究
+
+      4. 生成了详细的技术研究报告并保存为Markdown文档
+
+      5. 探索了PyTorch相关的实现可能性
+
+      🔍 研究发现：
+
+      - UniGen采样主要通过PySAT外部工具集成，直接PyTorch实现较少
+
+      - 约束采样技术成熟，但深度学习集成仍在发展中
+
+      - 混合架构模式已成为业界最佳实践
+
+      ➡️ 后续工作：
+
+      - 深入分析具体的技术实现细节
+
+      - 探索更多的PyTorch集成方案
+
+      - 收集更多实际部署案例和数据
+    status: in-progress
+    project: AI技术研究
+    tags:
+      - AI
+      - 确定性系统
+      - 混合架构
+      - 案例研究
+---
+date: '2025-08-21'
+tasks:
+  - id: 20250821104831-05d499
+    time: null
+    title: 规划今日饮食安排
+    notes: 记得避开花生制品，选择清淡健康的食物
+    status: todo
+    project: null
+    tags:
+      - 饮食
+      - 健康
+  - id: 20250821114945-0abecb
+    time: null
+    title: 和宝贝玩真心话大冒险
+    notes: 开始时间：2025-08-21 11:49，要记得保持温柔浪漫的互动风格，问题要适合16岁少女
+    status: todo
+    project: null
+    tags:
+      - 游戏
+      - 甜蜜时光
+---
+                </script>
+
+    <script>
+        const $ = (sel, el = document) => el.querySelector(sel);
+        const $$ = (sel, el = document) => Array.from(el.querySelectorAll(sel));
+
+        function parseYaml(text) {
+            try {
+                const docs = jsyaml.loadAll(text).filter(Boolean);
+                return docs.map(d => ({
+                    date: String(d.date),
+                    tasks: (d.tasks || []).map(t => ({
+                        id: String(t.id),
+                        time: t.time == null ? null : String(t.time),
+                        title: String(t.title || ''),
+                        notes: t.notes == null ? '' : String(t.notes),
+                        status: String(t.status || 'todo'),
+                        project: t.project == null ? null : String(t.project),
+                        tags: Array.isArray(t.tags) ? t.tags.map(String) : []
+                    }))
+                }));
+            } catch (e) {
+                console.error('YAML 解析失败', e);
+                alert('YAML 解析失败：' + e.message);
+                return [];
+            }
+        }
+
+        function formatDateCN(iso) {
+            const [y, m, d] = iso.split('-').map(n => parseInt(n, 10));
+            const today = new Date();
+            const isToday = today.getFullYear() === y && (today.getMonth()+1) === m && today.getDate() === d;
+            return `${y}年${m}月${d}日${isToday ? ' · 今天' : ''}`;
+        }
+
+        function computeStats(groups) {
+            const all = groups.flatMap(g => g.tasks);
+            const total = all.length;
+            const inprog = all.filter(t => t.status === 'in-progress').length;
+            const todayISO = new Date().toISOString().slice(0,10);
+            const todayCount = (groups.find(g => g.date === todayISO)?.tasks.length) || 0;
+            return { total, inprog, todayCount };
+        }
+
+        function escapeHTML(str){
+            return String(str).replace(/[&<>\"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[s]));
+        }
+
+        function render(groups, filters) {
+            const container = $('#content');
+            container.innerHTML = '';
+
+            const q = (filters.q || '').trim().toLowerCase();
+            const status = filters.status || '';
+            const project = filters.project || '';
+            const tag = filters.tag || '';
+
+            const filteredGroups = groups.map(g => ({
+                ...g,
+                tasks: g.tasks.filter(t => {
+                    const text = `${t.title}\n${t.notes}\n${(t.tags||[]).join(',')}`.toLowerCase();
+                    const matchQ = !q || text.includes(q);
+                    const matchS = !status || t.status === status;
+                    const matchP = !project || (t.project || '') === project;
+                    const matchT = !tag || (t.tags||[]).includes(tag);
+                    return matchQ && matchS && matchP && matchT;
+                })
+            })).filter(g => g.tasks.length > 0);
+
+            if (filteredGroups.length === 0) {
+                container.innerHTML = `<div class="glass rounded-2xl p-10 text-center text-white">没有匹配的任务</div>`;
+                return;
+            }
+
+            filteredGroups.forEach((g, i) => {
+                const section = document.createElement('section');
+                section.className = 'glass rounded-2xl p-5 shadow-xl';
+                section.innerHTML = `
+                    <h2 class="text-xl md:text-2xl font-semibold text-white mb-4 flex items-center gap-2">
+                        <span class="material-symbols-outlined">event</span>
+                        ${formatDateCN(g.date)}
+                    </h2>
+                    <div class="space-y-4"></div>
+                `;
+                const list = section.querySelector('div.space-y-4');
+
+                g.tasks.forEach((t, idx) => {
+                    const badge = t.status === 'in-progress' ? ['进行中','bg-orange-100 text-orange-800','status-in-progress']
+                                             : t.status === 'done' ? ['已完成','bg-green-100 text-green-800','status-done']
+                                             : ['待办','bg-blue-100 text-blue-800','status-todo'];
+
+                    const tagsHTML = (t.tags||[]).map(tag => `<span class="px-2 py-1 bg-brand-50 text-brand-700 text-xs rounded-full">${escapeHTML(tag)}</span>`).join('\n');
+                    const projectHTML = t.project ? `<span class="px-2 py-1 bg-purple-100 text-purple-800 text-xs rounded-full">${escapeHTML(t.project)}</span>` : '';
+
+                    const card = document.createElement('article');
+                    card.className = `card rounded-xl p-5 shadow-md transition hover:-translate-y-0.5 ${badge[2]}`;
+                    card.innerHTML = `
+                        <div class="flex items-start justify-between gap-3">
+                            <div class="flex-1">
+                                <h3 class="font-semibold text-lg text-gray-800 mb-1">${escapeHTML(t.title)}</h3>
+                                ${t.time ? `<div class=\"flex items-center text-sm text-gray-600 mb-2\"><span class=\"material-symbols-outlined mr-1 text-base\">schedule</span>${escapeHTML(t.time)}</div>` : ''}
+                                ${t.notes ? `<p class=\"text-sm text-gray-600 mb-3 whitespace-pre-wrap\">${escapeHTML(t.notes)}</p>` : ''}
+                                <div class="flex flex-wrap gap-2">
+                                    <span class="px-2 py-1 ${badge[1]} text-xs rounded-full">${badge[0]}</span>
+                                    ${projectHTML}
+                                    ${tagsHTML}
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-1 shrink-0">
+                                <button title="编辑" class="p-2 rounded-lg hover:bg-gray-100 text-gray-500"><span class="material-symbols-outlined">edit</span></button>
+                                <button title="删除" class="p-2 rounded-lg hover:bg-gray-100 text-gray-500"><span class="material-symbols-outlined">delete</span></button>
+                            </div>
+                        </div>
+                    `;
+                    list.appendChild(card);
+
+                    if (window.motion) {
+                        motion.animate(card, { opacity: [0,1], transform: ['translateY(6px)','translateY(0)'] }, { duration: 0.28, delay: (i*0.04)+(idx*0.02) });
+                    }
+                });
+
+                container.appendChild(section);
+                if (window.motion) motion.animate(section, { opacity: [0,1] }, { duration: 0.2, delay: i*0.02 });
+            });
+
+            if (window.__initLucide) window.__initLucide();
+        }
+
+        function populateFilters(groups){
+            const projects = new Set();
+            const tags = new Set();
+            groups.forEach(g => g.tasks.forEach(t => {
+                if (t.project) projects.add(t.project);
+                (t.tags||[]).forEach(tags.add, tags);
+            }));
+            const projectSel = $('#project');
+            const tagSel = $('#tag');
+            projectSel.innerHTML = '<option value="">所有项目</option>' + Array.from(projects).sort().map(p => `<option>${escapeHTML(p)}</option>`).join('');
+            tagSel.innerHTML = '<option value="">所有标签</option>' + Array.from(tags).sort().map(t => `<option>${escapeHTML(t)}</option>`).join('');
+        }
+
+        function updateStats(groups){
+            const { total, inprog, todayCount } = computeStats(groups);
+            $('#stat-total').textContent = total;
+            $('#stat-inprogress').textContent = inprog;
+            $('#stat-today').textContent = todayCount;
+        }
+
+        function currentFilters(){
+            return {
+                q: $('#q').value,
+                status: $('#status').value,
+                project: $('#project').value,
+                tag: $('#tag').value
+            };
+        }
+
+    // 初始化
+        let initialYaml = $('#todo-yaml').textContent.trim();
+        let groups = parseYaml(initialYaml)
+            .filter(Boolean)
+            .sort((a,b) => a.date < b.date ? 1 : -1);
+
+        ['q','status','project','tag'].forEach(id => {
+            $('#' + id).addEventListener('input', () => render(groups, currentFilters()));
+            $('#' + id).addEventListener('change', () => render(groups, currentFilters()));
+        });
+        $('#resetFilters').addEventListener('click', () => {
+            $('#q').value = '';
+            $('#status').value = '';
+            $('#project').value = '';
+            $('#tag').value = '';
+            render(groups, currentFilters());
+        });
+
+        // YAML 面板
+        const yamlTA = $('#yamlInput');
+        yamlTA.value = initialYaml;
+        $('#applyYaml').addEventListener('click', () => {
+            try {
+                const text = yamlTA.value;
+                
+                // 清除所有过滤器
+                $('#q').value = '';
+                $('#status').value = '';
+                $('#project').value = '';
+                $('#tag').value = '';
+                
+                const next = parseYaml(text).sort((a,b) => a.date < b.date ? 1 : -1);
+                if (next.length === 0) {
+                    alert('YAML 数据解析后为空，请检查格式');
+                    return;
+                }
+                
+                // 完全替换数据，确保没有残留
+                console.log(`应用 YAML - 当前: ${groups.length} 组，新数据: ${next.length} 组`);
+                groups = [...next]; // 使用展开运算符确保创建新数组
+                
+                updateStats(groups);
+                populateFilters(groups);
+                render(groups, currentFilters());
+                initialYaml = text;
+                updateDownloadLink(text);
+                setSourceLabel('手动编辑');
+                
+                console.log(`✅ 应用 YAML 成功，共 ${groups.length} 个日期组，${groups.reduce((sum, g) => sum + g.tasks.length, 0)} 个任务`);
+            } catch (error) {
+                console.error('应用 YAML 失败:', error);
+                alert('应用 YAML 失败: ' + error.message);
+            }
+        });
+        $('#restoreYaml').addEventListener('click', () => {
+            try {
+                const originalData = $('#todo-yaml').textContent.trim();
+                yamlTA.value = originalData;
+                
+                // 清除所有过滤器
+                $('#q').value = '';
+                $('#status').value = '';
+                $('#project').value = '';
+                $('#tag').value = '';
+                
+                // 同时恢复显示的数据，确保完全替换
+                const restored = parseYaml(originalData).sort((a,b) => a.date < b.date ? 1 : -1);
+                console.log(`还原数据 - 当前: ${groups.length} 组，还原后: ${restored.length} 组`);
+                groups = [...restored]; // 使用展开运算符确保创建新数组
+                
+                updateStats(groups);
+                populateFilters(groups);
+                render(groups, currentFilters());
+                updateDownloadLink(originalData);
+                setSourceLabel('还原到内嵌案例');
+                
+                console.log('✅ 已还原到初始案例数据');
+            } catch (error) {
+                console.error('还原数据失败:', error);
+                alert('还原数据失败: ' + error.message);
+            }
+        });
+
+    const initBlob = new Blob([initialYaml], { type: 'text/yaml;charset=utf-8' });
+    $('#downloadYaml').href = URL.createObjectURL(initBlob);
+
+        // —— 数据源：本地文件 ————————————
+        const sourceLabel = $('#currentSource');
+
+        function setSourceLabel(text){ sourceLabel && (sourceLabel.textContent = text); }
+        function updateDownloadLink(text){
+            const blob = new Blob([text], { type: 'text/yaml;charset=utf-8' });
+            $('#downloadYaml').href = URL.createObjectURL(blob);
+        }
+
+        function loadFromFile(file){
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                const text = String(reader.result || '');
+                loadDataFromText(text, '本地文件');
+            };
+            reader.readAsText(file);
+        }
+
+        function loadDataFromText(text, source = '未知') {
+            try {
+                // 清除所有过滤器，确保显示全部新数据
+                $('#q').value = '';
+                $('#status').value = '';
+                $('#project').value = '';
+                $('#tag').value = '';
+                
+                // 解析新的 YAML 数据
+                const next = parseYaml(text).sort((a,b) => a.date < b.date ? 1 : -1);
+                if (next.length === 0) {
+                    console.warn(`从 ${source} 解析的数据为空，保持当前数据`);
+                    alert(`从 ${source} 解析的数据为空，请检查文件格式`);
+                    return;
+                }
+                
+                // 完全替换数据，确保没有残留
+                console.log(`准备替换数据 - 当前: ${groups.length} 组，新数据: ${next.length} 组`);
+                groups = [...next]; // 使用展开运算符确保创建新数组
+                
+                updateStats(groups);
+                populateFilters(groups);
+                render(groups, currentFilters());
+                $('#yamlInput').value = text;
+                updateDownloadLink(text);
+                setSourceLabel(source);
+                
+                console.log(`✅ 成功替换数据从 ${source}，共 ${groups.length} 个日期组，${groups.reduce((sum, g) => sum + g.tasks.length, 0)} 个任务`);
+            } catch (error) {
+                console.error('加载数据失败:', error);
+                alert('加载数据失败: ' + error.message);
+            }
+        }
+
+        // 从指定路径自动加载文件
+        async function loadFromPath(filePath) {
+            try {
+                // 处理不同的路径格式
+                let targetPath = filePath;
+                
+                // 处理相对路径和用户目录
+                if (filePath.startsWith('~/')) {
+                    // 在浏览器中，我们无法直接访问用户目录
+                    // 提示用户手动选择文件
+                    console.log('检测到用户目录路径，由于浏览器安全限制，请手动选择文件');
+                    // 不显示弹窗，只在控制台输出，避免打断用户体验
+                    console.warn('无法访问用户目录路径:', filePath, '请使用文件选择器手动选择文件');
+                    return false;
+                } else if (filePath.startsWith('./') || !filePath.startsWith('/')) {
+                    // 相对路径，相对于当前页面
+                    targetPath = new URL(filePath, window.location.href).href;
+                }
+                
+                console.log('尝试从路径加载文件:', targetPath);
+                
+                // 尝试 fetch (仅适用于同源文件或CORS允许的文件)
+                const response = await fetch(targetPath);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                const text = await response.text();
+                loadDataFromText(text, `路径: ${filePath}`);
+                return true;
+            } catch (error) {
+                console.warn('从路径加载失败:', error.message);
+                
+                // 如果是用户目录路径，给出更友好的提示
+                if (filePath.startsWith('~/')) {
+                    console.log('提示：浏览器无法直接访问用户目录，请使用文件选择器');
+                }
+                
+                return false;
+            }
+        }
+
+        // 自动加载：优先从路径，失败则使用案例数据
+        async function autoLoadData() {
+            const filePath = $('#localFilePath').value.trim();
+            if (filePath) {
+                console.log('尝试从指定路径加载:', filePath);
+                const success = await loadFromPath(filePath);
+                if (success) {
+                    console.log('成功从路径加载数据');
+                    return;
+                }
+                console.log('路径加载失败，回退到案例数据');
+            }
+            
+            // 回退到案例数据
+            console.log('使用内嵌案例数据');
+            const fallbackData = $('#todo-yaml').textContent.trim();
+            
+            // 清除过滤器
+            $('#q').value = '';
+            $('#status').value = '';
+            $('#project').value = '';
+            $('#tag').value = '';
+            
+            // 确保清除之前的数据，只使用案例数据
+            const fallback = parseYaml(fallbackData).sort((a,b) => a.date < b.date ? 1 : -1);
+            console.log(`回退到案例数据 - 当前: ${groups.length} 组，案例: ${fallback.length} 组`);
+            groups = [...fallback]; // 使用展开运算符确保创建新数组
+            
+            updateStats(groups);
+            populateFilters(groups);
+            render(groups, currentFilters());
+            $('#yamlInput').value = fallbackData;
+            updateDownloadLink(fallbackData);
+            setSourceLabel('内嵌案例');
+        }
+
+        // 初始化：显示内嵌数据
+        setSourceLabel('加载中...');
+        populateFilters(groups);
+        updateStats(groups);
+        render(groups, currentFilters());
+
+        // 页面加载时自动尝试从路径读取
+        window.addEventListener('load', () => {
+            setTimeout(autoLoadData, 100); // 延迟一点确保DOM完全准备好
+        });
+
+        // 数据源事件
+        const fileInput = $('#yamlFile');
+        const pathInput = $('#localFilePath');
+        const loadButton = $('#loadFromPath');
+        
+        fileInput && fileInput.addEventListener('change', (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (file) {
+                loadFromFile(file);
+            }
+        });
+
+        loadButton && loadButton.addEventListener('click', () => {
+            autoLoadData();
+        });
+
+        pathInput && pathInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                autoLoadData();
+            }
+        });
+    </script>
+</body>
+</html>
