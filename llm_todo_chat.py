@@ -859,6 +859,30 @@ def build_system_header(provider: str, model: str) -> str:
     )
 
 
+# search 工具的提示词单独声明
+
+def build_search_tool_prompt_snippet(provider: str, model: str, search_tools: list[str]) -> str:
+    """构造搜索工具的声明提示词，用于LLM识别到Search工具，以便激活其管理 搜索+工具 语境范围的能力"""
+    
+    if search_tools:
+        base_tool = search_tools[0]
+        alternative_backup = ""
+        
+        if len(search_tools) > 1:
+            for i, _tool in enumerate(search_tools[1:]):
+                alternative_backup += f"{i} : {_tool}\n\n"
+
+        return (
+            "## 搜索工具声明\n\n"
+            "目前已注册可用的搜索工具包含如下:\n\n"
+            f"默认优先使用 stand by 的搜索工具: {base_tool}\n\n"
+            "若 stand by 工具服务不可用, 则尝试使用 alternative backup 的搜索工具\n\n"
+            "alternative backup 的搜索工具包含:\n\n"
+        ) + alternative_backup
+
+    else:
+        return ""
+
 # 默认身份提示函数-日程管理
 
 
@@ -4474,6 +4498,8 @@ def tool__human__input(
 CONTROL_RESET = "CONTROL:RESET_MESSAGES"
 CURRENT_CHAT_MESSAGES: Optional[List[Dict[str, str]]] = None
 PENDING_RESET_MESSAGES: Optional[List[Dict[str, str]]] = None
+# 工具轮次预算控制信号（AI 调用“请求更多轮次”工具并获用户授权后返回）
+CONTROL_ADD_ROUNDS = "CONTROL:ADD_TOOL_ROUNDS"
 
 
 def tool__reflect__negate_and_reflect(
@@ -4817,6 +4843,47 @@ def tool__mcp__list(server: str | None = None, json_mode: str = "false") -> str:
         return f"ERROR: {e}"
 
 
+def tool__rounds__request_more(count: str = "1", reason: Optional[str] = None) -> str:
+    """
+    请求为“本轮工具调用循环”增加额外轮次预算。
+    - 参数:
+      * count: 请求增加的轮次数（字符串整数），默认 "1"；会被限制在 [1, 6]
+      * reason: 申请理由，会用于提示用户
+    - 交互:
+      * 在 TTY 环境下询问用户是否授权；是则返回 CONTROL:ADD_TOOL_ROUNDS 携带 JSON 载荷；否则返回 DECLINED。
+      * 无 TTY 时返回错误。
+    - 返回:
+      * 授权: "CONTROL:ADD_TOOL_ROUNDS {\"count\":<int>,\"reason\":\"...\"}"
+      * 拒绝: "DECLINED: user-rejected"
+      * 错误: "ERROR: ..."
+    """
+    try:
+        n = int(str(count).replace("_", ""))
+        if n <= 0:
+            n = 1
+        if n > 6:
+            n = 6
+    except Exception:
+        n = 1
+
+    if not sys.stdin.isatty():
+        return "ERROR: human-input-unavailable (stdin not tty)"
+
+    try:
+        tip = f"是否授权增加 {n} 次工具轮次预算？"
+        if isinstance(reason, str) and reason.strip():
+            tip += f" 理由: {reason.strip()}"
+        ans = input(tip + " [y/N]> ").strip().lower()
+        if ans in {"y", "yes"}:
+            payload = json.dumps({"count": n, "reason": reason or ""}, ensure_ascii=False)
+            return f"{CONTROL_ADD_ROUNDS} {payload}"
+        return "DECLINED: user-rejected"
+    except KeyboardInterrupt:
+        return "ERROR: user-cancelled"
+    except Exception as e:
+        return f"ERROR: {e}"
+    
+
 TOOLS_REGISTRY: Dict[str, Any] = {
     # Bio 工具注册
     "tool__bio__add": tool__bio__add,
@@ -4840,6 +4907,8 @@ TOOLS_REGISTRY: Dict[str, Any] = {
     # Human-in-Loop 与文件系统工具
     "tool__human__input": tool__human__input,
     "tool__fs__save_file": tool__fs__save_file,
+    # 轮次预算工具
+    "tool__rounds__request_more": tool__rounds__request_more,
     # 安全终止会话工具
     "tool__safety__terminate": tool__safety__terminate,
     # Util 工具
@@ -4848,7 +4917,10 @@ TOOLS_REGISTRY: Dict[str, Any] = {
     "tool__mcp__call": tool__mcp__call,
     "tool__mcp__list": tool__mcp__list,
 }
-
+SEARCH_TOOLS_REGISTRY: List[str] = [
+    "tool__jina__web_search",
+    "Call tool__mcp__list to find an external search tool. If it exists, use the new search tool by calling tool__mcp__call."
+]
 #
 # endregion 15 Tool Wrappers (bio/todo/jina/reflect/fs/human/calc/date)
 #############################
@@ -5300,6 +5372,7 @@ def interactive_invoke(
     # 新增：在 header 与 effective_system 之间插入用户 Bio Markdown
     bio_md = build_user_bio_markdown()
     header = build_system_header(provider=provider, model=model)
+    search_tool_prompt_snippet = build_search_tool_prompt_snippet(provider=provider, model=model, search_tools=SEARCH_TOOLS_REGISTRY)
     tone_and_style_guidance = build_tone_and_style_guidance_prompt(
         tone_ane_style_name=tone_ane_style_name
     )
@@ -5308,7 +5381,7 @@ def interactive_invoke(
     if bio_md.strip():
         parts.append("")
         parts.append(bio_md)
-    parts.extend(["", effective_system, "", tools_desc, "", tools_guidance])
+    parts.extend(["", effective_system, "", tools_desc, "", tools_guidance, "", search_tool_prompt_snippet])
     parts.extend(["", tone_and_style_guidance, ""])
     parts.extend(["", footer])
     system_full = "\n".join(parts)
@@ -5764,8 +5837,14 @@ def interactive_invoke(
 
             # 将工具调用处理改为循环，直到没有 antml 或达到安全上限
             MAX_TOOL_ROUNDS = 6 if canonical_role == "deep_researcher" else 2
-            tool_rounds = 0
+            tool_rounds = 1 # 计数从1开始, 消除 LLM 对 0 的误解
 
+            # 本轮动态额外预算（由 tool__rounds__request_more 授权）
+            additional_tool_round_budget = 0
+
+            def _allowed_rounds() -> int:
+                return MAX_TOOL_ROUNDS + additional_tool_round_budget
+            
             # 当触发“否定并反思”时，标记并提前结束本轮对话
             reflect_reset_triggered = False
 
@@ -5773,12 +5852,23 @@ def interactive_invoke(
                 calls = parse_antml_calls(assistant)
                 if not calls:
                     break
-                if tool_rounds >= MAX_TOOL_ROUNDS:
+                # 执行工具（弱色旋转指示器）
+                need_human = any(
+                    isinstance(c.get("name"), str)
+                    and c.get("name") in {"tool__human__input", "tool__rounds__request_more"}
+                    for c in calls
+                )
+
+                # 依据动态预算限制每轮最大工具调用次数
+                # 因为技术是从1 开始, 所以 +1
+                if tool_rounds >= int(_allowed_rounds() + 1) and not need_human:
                     try:
-                        console.print(Panel(f"已达到每轮工具调用上限 {MAX_TOOL_ROUNDS}，停止继续调用。", border_style=WEAK_BORDER, style=WEAK_STYLE))  # type: ignore
+                        console.print(Panel(f"已达到每轮工具调用上限 {_allowed_rounds()}，停止继续调用。", border_style=WEAK_BORDER, style=WEAK_STYLE))  # type: ignore
                     except Exception:
                         pass
                     break
+
+                need_human = False
 
                 # 记录工具调用（含 commentary）
                 round_index = tool_rounds + 1
@@ -5796,7 +5886,7 @@ def interactive_invoke(
                 # 执行工具（弱色旋转指示器）
                 need_human = any(
                     isinstance(c.get("name"), str)
-                    and c.get("name") == "tool__human__input"
+                    and c.get("name") in {"tool__human__input", "tool__rounds__request_more"}
                     for c in calls
                 )
                 if need_human:
@@ -5825,6 +5915,34 @@ def interactive_invoke(
                 results_xml, request_id, commentary = build_antml_results(results)
                 chatdb_log_message(chat_session_uuid, turn_index, "tool", results_xml)
 
+                # 解析并应用“增加工具轮次预算”的控制信号
+                try:
+                    added = 0
+                    for r in results:
+                        out = r.get("output") or ""
+                        if isinstance(out, str) and out.startswith(CONTROL_ADD_ROUNDS):
+                            tail = out[len(CONTROL_ADD_ROUNDS):].strip()
+                            inc = 1
+                            if tail:
+                                try:
+                                    if tail.startswith("{"):
+                                        obj = json.loads(tail)
+                                        inc = int(obj.get("count") or 1)
+                                    else:
+                                        inc = int(tail.split()[0])
+                                except Exception:
+                                    inc = 1
+                            if inc > 0:
+                                additional_tool_round_budget += inc
+                                added += inc
+                    if added > 0:
+                        try:
+                            console.print(Panel(f"已增加工具轮次预算 +{added}（当前上限: {_allowed_rounds()}）", border_style=WEAK_BORDER, style=WEAK_STYLE))  # type: ignore
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
                 # 把结果注入对话再问一次
                 prefix_pattern = re.compile(r"\{\{\s*" + re.escape(role) + r"\s*\}\}\s*:?\s*", re.IGNORECASE)
                 assistant_cleaned = prefix_pattern.sub("", assistant)
@@ -5837,11 +5955,14 @@ def interactive_invoke(
                     {
                         "role": "user", 
                         "content": (
-                            "工具调用经由{{ "+user_role_name+" }} 客户端执行后的返回结果如下:\n\n" + 
-                            results_xml + 
-                            "### Instructions \n\n task handoff from {{ " + user_role_name + " }} to {{ " + role + " }} : " + 
-                            commentary + 
-                            build_author_note(provider=provider, model=model, role=role, user_role_name=user_role_name)
+                            "工具调用经由{{ "+user_role_name+" }} 客户端执行后的返回结果如下:\n\n"
+                            + results_xml
+                            + "\n\n[轮次状态] 允许: " + str(_allowed_rounds()) + "; 已用: " + str(tool_rounds) + "; 本次预期消耗: 1; 剩余:" + str(_allowed_rounds() - tool_rounds - 1) + "\n"
+                            + ("当前余额过低，请记得申请新额度" if tool_rounds/_allowed_rounds() >= 0.8 else "") + "\n"
+                            + "若需要更多工具轮次，请调用 tool__rounds__request_more，并说明理由（参数: count, reason）。\n\n"
+                            + "### Instructions \n\n task handoff from {{ " + user_role_name + " }} to {{ " + role + " }} : "
+                            + commentary
+                            + build_author_note(provider=provider, model=model, role=role, user_role_name=user_role_name)
                         )
                     })
 
@@ -6258,7 +6379,7 @@ def interactive_invoke(
                     parts_list.append("")
                     parts_list.append(bio_md)
                 parts_list.extend(
-                    ["", new_effective_system, "", tools_desc, "", tools_guidance]
+                    ["", new_effective_system, "", tools_desc, "", tools_guidance, "", search_tool_prompt_snippet]
                 )
                 parts_list.extend(["", tone_and_style_guidance, ""])
                 parts_list.extend(["", footer])
@@ -6343,6 +6464,8 @@ def interactive_invoke(
                         tools_desc,
                         "",
                         tools_guidance,
+                        "",
+                        search_tool_prompt_snippet
                     ]
                 )
                 parts_list.extend(["", tone_and_style_guidance, ""])

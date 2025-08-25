@@ -24,6 +24,7 @@ coverage.xml
 __pycache__/
 *.py[cod]
 *$py.class
+.python-version
 
 # Distribution / packaging
 .Python
