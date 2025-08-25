@@ -5826,7 +5826,11 @@ def interactive_invoke(
                 chatdb_log_message(chat_session_uuid, turn_index, "tool", results_xml)
 
                 # 把结果注入对话再问一次
-                messages.append({"role": "assistant", "content": "{{ "+ role +" }}: " + assistant})
+                prefix_pattern = re.compile(r"\{\{\s*" + re.escape(role) + r"\s*\}\}\s*:?\s*", re.IGNORECASE)
+                assistant_cleaned = prefix_pattern.sub("", assistant)
+                canonical_prefix = f"{{{{ {role} }}}}: "
+                assistant_final = canonical_prefix + assistant_cleaned
+                messages.append({"role": "assistant", "content": assistant_final})
                 # 由于这里借用的 user 角色，这里需要重新为新消息传递目标进行接力
 
                 messages.append(
@@ -6039,7 +6043,11 @@ def interactive_invoke(
 
             # 在助手 panel 下展示上下文窗口用量
             _print_token_usage(latest_usage, elapsed_sec=latest_elapsed)
-            messages.append({"role": "assistant", "content": "{{ "+ role +" }}: " + assistant})
+            prefix_pattern = re.compile(r"\{\{\s*" + re.escape(role) + r"\s*\}\}\s*:?\s*", re.IGNORECASE)
+            assistant_cleaned = prefix_pattern.sub("", assistant)
+            canonical_prefix = f"{{{{ {role} }}}}: "
+            assistant_final = canonical_prefix + assistant_cleaned
+            messages.append({"role": "assistant", "content": assistant_final})
 
             # 记录本轮片段范围与 usage、摘要
             end_len = len(messages)
