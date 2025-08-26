@@ -249,6 +249,21 @@ def list_paths(output: str = "plain") -> None:
 def _is_macos() -> bool:
     return sys.platform == "darwin"
 
+# AI 仿生能力配置：集中管理可开关的“仿生能力”（语音/视觉/动作等）
+BIONIC_CAPABILITIES: Dict[str, Any] = {
+    "speech": {
+        "enabled": True,               # 全局开关：语音能力
+        "engine": "macos_say",         # 实现引擎（当前仅支持 macOS 'say'）
+        "rate_default": 152,           # 有声线时的默认速率
+        "rate_fallback": 167,          # 无声线时的回退速率
+        "voices": {
+            "s1": "Evan (Enhanced)",   # s1: 男声
+            "s2": "Allison (Enhanced)" # s2: 女声
+        },
+    }
+}
+
+MAX_TOOL_ROUNDS_MIN_BOUNDARY = 60
 
 # ===== 文本补全所需的历史文件 =====
 # 新增：历史文件限制相关环境变量与工具函数
@@ -4629,6 +4644,113 @@ def tool__safety__terminate(
     except Exception:
         return CONTROL_TERMINATE
 
+# 仿生能力
+
+# 说话
+
+def tool__speech__say(content: str, say_all: str = "true") -> str:
+    """
+    使用 macOS 'say' 将文本朗读出来（支持按行控制音色）。
+    重要：content 必须仅为“口播的台词”内容本身，不要添加任何额外解释或上下文描述；
+         不要输出“好的，我来播报：”等前/后缀；不要加引号、Markdown/代码块或多余标点装饰。
+         允许的仅是要朗读的台词文本（可含行级前缀控制音色）。
+
+    参数:
+      - content: 多行台词文本。
+      - say_all: "true"/"false" —— true 时朗读所有行（忽略前缀）
+    返回: "OK: spoken <n>" 或 "ERROR: <msg>"
+    """
+    try:
+        if not _is_macos():
+            return "ERROR: say-only-on-macos"
+
+        # 避免未定义时报错；允许缺省为禁用
+        speech_root = globals().get("BIONIC_CAPABILITIES", {}) or {}
+        speech_conf = speech_root.get("speech", {}) or {}
+        if not speech_conf or not speech_conf.get("enabled", False):
+            return "ERROR: speech-disabled"
+
+        rate_default = int(speech_conf.get("rate_default", 152))
+        rate_fallback = int(speech_conf.get("rate_fallback", 167))
+        voices = speech_conf.get("voices", {}) or {}
+
+        speak_all = str(say_all).strip().lower() in {"1", "true", "yes", "on"}
+        lines = [
+            i
+            for i in str(content).splitlines()
+            if i.startswith("s1:") or i.startswith("s2:") or i.startswith("s?:") or speak_all
+        ]
+        if not lines:
+            return "ERROR: no-lines-to-say"
+
+        # 估算时长：按 UTF-8 字节数 + 速率(wpm)换算为 bytes/sec
+        AVG_BYTES_PER_WORD = 1.0
+        TIMEOUT_MAX_BOUNDARY = 300
+
+        def _estimate_secs_by_bytes(text: str, wpm: int) -> float:
+            t = (text or "").strip()
+            if not t:
+                return 0.4
+            bytes_len = len(t.encode("utf-8", errors="ignore"))
+            bytes_per_sec = max(1e-3, (float(wpm) * AVG_BYTES_PER_WORD) / 60.0)
+            secs = bytes_len / bytes_per_sec
+            return min(max(secs, 0.4), 120.0)
+
+        def _run_cmd_with_retry(cmd: list[str], attempts: int = 2, timeout: float = 15.0) -> None:
+            last_err: Optional[Exception] = None
+            for k in range(attempts):
+                try:
+                    subprocess.run(cmd, check=True, timeout=timeout)
+                    return
+                except Exception as e:
+                    last_err = e
+                    if k + 1 < attempts:
+                        time.sleep(0.4 * (k + 1))
+            raise RuntimeError(f"say-failed: {last_err}")
+
+        spoken = 0
+        for m in lines:
+            if m.startswith("s1:") or m.startswith("s?:"):
+                text = m.replace("s1:", "", 1)
+                if m.startswith("s?:"):
+                    text = m.replace("s?:", "", 1)
+                est = _estimate_secs_by_bytes(text.lstrip("-"), rate_default)
+                per_timeout = min(max(est * 1.5, 3.0), TIMEOUT_MAX_BOUNDARY)
+                cmd = [
+                    "say",
+                    "-r",
+                    str(rate_default),
+                    "-v",
+                    voices.get("s1", "Evan (Enhanced)"),
+                    text.lstrip("-"),
+                ]
+            elif m.startswith("s2:"):
+                text = m.replace("s2:", "", 1)
+                est = _estimate_secs_by_bytes(text.lstrip("-"), rate_default)
+                per_timeout = min(max(est * 1.5, 3.0), TIMEOUT_MAX_BOUNDARY)
+                cmd = [
+                    "say",
+                    "-r",
+                    str(rate_default),
+                    "-v",
+                    voices.get("s2", "Allison (Enhanced)"),
+                    text.lstrip("-"),
+                ]
+            else:
+                text = m.lstrip("-")
+                est = _estimate_secs_by_bytes(text, rate_fallback)
+                per_timeout = min(max(est * 1.5, 3.0), TIMEOUT_MAX_BOUNDARY)
+                cmd = ["say", "-r", str(rate_fallback), text]
+
+            try:
+                _run_cmd_with_retry(cmd, attempts=2, timeout=per_timeout)
+                spoken += 1
+            except Exception as e:
+                return f"ERROR: {e}"
+
+        return f"OK: spoken {spoken}"
+    except Exception as e:
+        return f"ERROR: {e}"
 
 # 代办事项工具
 def tool__todo__add_task(
@@ -4847,7 +4969,7 @@ def tool__rounds__request_more(count: str = "1", reason: Optional[str] = None) -
     """
     请求为“本轮工具调用循环”增加额外轮次预算。
     - 参数:
-      * count: 请求增加的轮次数（字符串整数），默认 "1"；会被限制在 [1, 6]
+      * count: 请求增加的轮次数（字符串整数），默认 "1"；会被限制在 [1, 60]
       * reason: 申请理由，会用于提示用户
     - 交互:
       * 在 TTY 环境下询问用户是否授权；是则返回 CONTROL:ADD_TOOL_ROUNDS 携带 JSON 载荷；否则返回 DECLINED。
@@ -4861,8 +4983,8 @@ def tool__rounds__request_more(count: str = "1", reason: Optional[str] = None) -
         n = int(str(count).replace("_", ""))
         if n <= 0:
             n = 1
-        if n > 6:
-            n = 6
+        if n > 60:
+            n = 60
     except Exception:
         n = 1
 
@@ -4916,7 +5038,10 @@ TOOLS_REGISTRY: Dict[str, Any] = {
     "tool__date__calc": tool__date__calc,
     "tool__mcp__call": tool__mcp__call,
     "tool__mcp__list": tool__mcp__list,
+    # 仿生能力
+    "tool__speech__say": tool__speech__say,
 }
+
 SEARCH_TOOLS_REGISTRY: List[str] = [
     "tool__jina__web_search",
     "Call tool__mcp__list to find an external search tool. If it exists, use the new search tool by calling tool__mcp__call."
@@ -5663,6 +5788,9 @@ def interactive_invoke(
         chatdb_log_message(chat_session_uuid, turn_index, "user", user_text)
         latest_elapsed: Optional[float] = None
 
+        # 跟踪本轮中所有 Live 面板，便于 Ctrl+C 时统一停止，恢复提示符
+        active_live_boxes: List[_StreamPanels] = []
+
         # 统一的安全换行函数：优先使用 rich，失败回退到 stdout
         def _newline(times: int = 1) -> None:
             if times <= 0:
@@ -5777,6 +5905,10 @@ def interactive_invoke(
             else:
                 # 流式：实时输出 content 与 reasoning_content
                 stream_ui = _StreamPanels(console)
+                
+                # 将面板登记，便于 Ctrl+C 时统一 stop()
+                active_live_boxes.append(stream_ui)
+
                 # 收集 reasoning 以便入库
                 r_collected: List[str] = []
                 on_reasoning, on_reasoning_end, r_state = _make_reasoning_handlers(
@@ -5836,7 +5968,7 @@ def interactive_invoke(
             _add_usage(usage1)
 
             # 将工具调用处理改为循环，直到没有 antml 或达到安全上限
-            MAX_TOOL_ROUNDS = 6 if canonical_role == "deep_researcher" else 2
+            MAX_TOOL_ROUNDS = 6+MAX_TOOL_ROUNDS_MIN_BOUNDARY if canonical_role == "deep_researcher" else MAX_TOOL_ROUNDS_MIN_BOUNDARY
             tool_rounds = 1 # 计数从1开始, 消除 LLM 对 0 的误解
 
             # 本轮动态额外预算（由 tool__rounds__request_more 授权）
@@ -6066,6 +6198,10 @@ def interactive_invoke(
                     else:
                         # 第二轮及后续也使用流式输出
                         stream_ui2 = _StreamPanels(console)
+                        
+                        # 将面板登记，便于 Ctrl+C 时统一 stop()
+                        active_live_boxes.append(stream_ui2)
+
                         r2_collected: List[str] = []
                         on_reasoning2, on_reasoning_end2, r2_state = (
                             _make_reasoning_handlers(stream_ui2)
@@ -6184,6 +6320,15 @@ def interactive_invoke(
         except KeyboardInterrupt:
             # 用户在生成/流式过程中按下 Ctrl+C：撤回本轮新增消息并提示已中断，而不退出整体会话
             try:
+                # 安全停止所有仍在运行的 Live 面板，恢复提示符
+                try:
+                    for _box in active_live_boxes:
+                        try:
+                            _box.stop()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 del messages[start_len:]
             except Exception:
                 pass
