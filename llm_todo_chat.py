@@ -660,6 +660,7 @@ def chatdb_log_tool_results(
 #
 # ===== DeepSeek API 与 Keychain 支持 =====
 DEEPSEEK_ENDPOINT = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_ENDPOINT_BETA = "https://api.deepseek.com/beta/chat/completions"
 API_KEY_ENV = "DEEPSEEK_API_KEY"
 KEYCHAIN_SERVICE = "todo_yaml_deepseek"
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant.  \n"
@@ -1318,7 +1319,7 @@ class DeepSeekClient:
         return key
 
     def _make_request(
-        self, payload: Dict[str, Any], api_key: str
+        self, payload: Dict[str, Any], api_key: str, use_beta: Optional[bool] = None
     ) -> urllib.request.Request:
         # 流式时尽量声明接收 event-stream
         headers = {
@@ -1328,8 +1329,26 @@ class DeepSeekClient:
         if payload.get("stream"):
             headers["Accept"] = "text/event-stream"
         data = json.dumps(payload).encode("utf-8")
+        # 当消息中包含 {"prefix": true} 时，DeepSeek 仅在 beta 端点支持
+        need_beta = False
+        try:
+            if use_beta is not None:
+                need_beta = bool(use_beta)
+            else:
+                msgs = payload.get("messages") or []
+                for m in msgs:
+                    if isinstance(m, dict) and m.get("prefix"):
+                        need_beta = True
+                        break
+        except Exception:
+            need_beta = False
+
+        endpoint_url = (
+            DEEPSEEK_ENDPOINT_BETA if need_beta else self.endpoint
+        )
+        print(endpoint_url)
         return urllib.request.Request(
-            self.endpoint, method="POST", data=data, headers=headers
+            endpoint_url, method="POST", data=data, headers=headers
         )
 
     def chat_completion(
@@ -1341,27 +1360,90 @@ class DeepSeekClient:
         timeout: int = 600,
         extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """非流式调用，返回完整 JSON 对象。"""
+        """非流式调用，强制 max_token=1024，若 finish_reason=length 则以 prefix 续写，直到 stop。"""
         key = self._resolve_key(api_key)
-        payload: Dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "stream": False,
-            "max_token": (8 * 1_024),
-        }
-        if extra:
-            payload.update({k: v for k, v in extra.items() if v is not None})
-        req = self._make_request(payload, key)
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                body = resp.read().decode("utf-8")
-                return json.loads(body)
-        except urllib.error.HTTPError as he:
-            err = he.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"HTTP {he.code}: {err}")
-        except urllib.error.URLError as ue:
-            raise RuntimeError(f"网络错误: {ue}")
 
+        # 工作副本，避免外部列表被原地修改
+        working_messages: List[Dict[str, Any]] = list(messages)
+        combined_content: str = ""
+        prefix_index: Optional[int] = None
+
+        # 累计 usage
+        usage_total: Dict[str, int] = {}
+
+        def _acc_usage(u: Optional[Dict[str, Any]]) -> None:
+            if not u:
+                return
+            for k, v in u.items():
+                if isinstance(v, int):
+                    usage_total[k] = usage_total.get(k, 0) + v
+
+        # 主循环：每轮请求 1024 token，直至非 length 结束
+        while True:
+            payload: Dict[str, Any] = {
+                "model": model,
+                "messages": working_messages,
+                "stream": False,
+                "max_token": 1_024,  # 强制每轮 1024
+            }
+            if extra:
+                # 允许透传部分参数，但不允许覆盖 stream 与 max_token 的强制策略
+                for k, v in extra.items():
+                    if v is None:
+                        continue
+                    if k in ("stream", "max_token"):
+                        continue
+                    payload[k] = v
+
+            # 含 prefix 时使用 beta 端点
+            need_beta = any(
+                isinstance(m, dict) and m.get("prefix") for m in working_messages
+            )
+            req = self._make_request(payload, key, use_beta=need_beta)
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    body = resp.read().decode("utf-8")
+                    obj = json.loads(body)
+            except urllib.error.HTTPError as he:
+                err = he.read().decode("utf-8", errors="ignore")
+                raise RuntimeError(f"HTTP {he.code}: {err}")
+            except urllib.error.URLError as ue:
+                raise RuntimeError(f"网络错误: {ue}")
+
+            choices = obj.get("choices") or []
+            c0 = choices[0] if choices else {}
+            msg = c0.get("message") or {}
+            piece = msg.get("content") or ""
+            combined_content += piece
+            fr = c0.get("finish_reason")
+            _acc_usage(obj.get("usage"))
+
+            if fr == "length":
+                # 在最后一条 prefix 的 assistant 消息上累计
+                if prefix_index is None:
+                    working_messages = list(working_messages) + [
+                        {"role": "assistant", "content": combined_content, "prefix": True}
+                    ]
+                    prefix_index = len(working_messages) - 1
+                else:
+                    working_messages[prefix_index]["content"] = combined_content
+                # 继续下一轮
+                continue
+
+            # 结束：构造汇总响应，内容为完整合并
+            # 以最后一轮的响应为模板，替换 message.content 与 usage 累计
+            if choices and "message" in c0:
+                c0["message"]["content"] = combined_content
+                c0["finish_reason"] = fr or "stop"
+            obj["choices"] = [c0] if choices else [{
+                "index": 0,
+                "message": {"role": "assistant", "content": combined_content},
+                "finish_reason": fr or "stop",
+            }]
+            if usage_total:
+                obj["usage"] = usage_total
+            return obj
+        
     def stream_chat_completion(
         self,
         messages: List[Dict[str, str]],
@@ -1369,6 +1451,7 @@ class DeepSeekClient:
         api_key: Optional[str] = None,
         timeout: int = 600,
         extra: Optional[Dict[str, Any]] = None,
+        stop: Optional[list[str]|str] = None,
     ) -> Generator[Dict[str, Any], None, None]:
         """流式调用，返回一个生成器，逐条产出解析后的 chunk 字典。"""
         key = self._resolve_key(api_key)
@@ -1378,6 +1461,8 @@ class DeepSeekClient:
             "stream": True,
             "max_token": (8 * 1_024),
         }
+        if stop:
+            payload["stop"] = stop
         if extra:
             payload.update({k: v for k, v in extra.items() if v is not None})
         req = self._make_request(payload, key)
@@ -1415,6 +1500,113 @@ class DeepSeekClient:
         except urllib.error.URLError as ue:
             raise RuntimeError(f"网络错误: {ue}")
 
+
+    def stream_chat_completion_reduced(
+        self,
+        messages: List[Dict[str, str]],
+        model: str = "deepseek-chat",
+        api_key: Optional[str] = None,
+        timeout: int = 600,
+        extra: Optional[Dict[str, Any]] = None,
+        stop: Optional[list[str]|str] = None,
+    ) -> Generator[Dict[str, Any], None, None]:
+        """
+        流式多轮续写：每轮强制 max_token=1024；当 finish_reason=length 时，以累计内容作为
+        assistant/prefix=True 的消息继续请求；仅在最终 stop 后输出 {"done": True}。
+        透明透传 chunk，便于上层继续使用现有增量解析器。
+        """
+        key = self._resolve_key(api_key)
+
+        # 工作副本与累计状态
+        working_messages: List[Dict[str, Any]] = list(messages)
+        combined_content: str = ""
+        prefix_index: Optional[int] = None
+
+        while True:
+            payload: Dict[str, Any] = {
+                "model": model,
+                "messages": working_messages,
+                "stream": True,
+                "max_token": 1_024,  # 强制每轮 1024
+            }
+            if stop:
+                payload["stop"] = stop
+            if extra:
+                for k, v in extra.items():
+                    if v is None:
+                        continue
+                    if k in ("stream", "max_token"):
+                        continue
+                    payload[k] = v
+
+            # 含 prefix 时使用 beta 端点
+            need_beta = any(
+                isinstance(m, dict) and m.get("prefix") for m in working_messages
+            )
+            req = self._make_request(payload, key, use_beta=need_beta)
+            last_finish_reason: Optional[str] = None
+
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    # 逐行读取 SSE
+                    for raw in resp:
+                        try:
+                            line = raw.decode("utf-8", errors="ignore").strip()
+                        except Exception:
+                            continue
+                        if not line:
+                            continue
+                        if line.startswith(":"):
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        data_part = line[5:].strip()
+                        if not data_part:
+                            continue
+                        if data_part == "[DONE]":
+                            # 不在中间轮输出 {"done": True}，由外层根据 finish_reason 决定是否继续
+                            break
+                        try:
+                            obj = json.loads(data_part)
+                        except Exception:
+                            continue
+
+                        # 累积内容以便 prefix 续写
+                        try:
+                            delta = (obj.get("choices") or [{}])[0].get("delta") or {}
+                            piece = delta.get("content") or ""
+                            if piece:
+                                combined_content += piece
+                            fr = (obj.get("choices") or [{}])[0].get("finish_reason")
+                            if fr:
+                                last_finish_reason = fr
+                        except Exception:
+                            pass
+
+                        # 透传 chunk
+                        yield obj
+
+            except urllib.error.HTTPError as he:
+                err = he.read().decode("utf-8", errors="ignore")
+                raise RuntimeError(f"HTTP {he.code}: {err}")
+            except urllib.error.URLError as ue:
+                raise RuntimeError(f"网络错误: {ue}")
+
+            # 根据 finish_reason 决定是否继续下一轮
+            if last_finish_reason == "length":
+                if prefix_index is None:
+                    working_messages = list(working_messages) + [
+                        {"role": "assistant", "content": combined_content, "prefix": True}
+                    ]
+                    prefix_index = len(working_messages) - 1
+                else:
+                    working_messages[prefix_index]["content"] = combined_content
+                # 继续下一轮
+                continue
+
+            # 最终结束
+            yield {"done": True}
+            break
 
 class ThinkTagExtractor:
     """
@@ -2372,9 +2564,17 @@ def invoke_chat(
 
     extractor = ThinkTagExtractor() if provider == "deepseek" else None
 
-    for chunk in client.stream_chat_completion(
-        messages=messages, model=model, api_key=api_key, timeout=timeout
-    ):
+    stream_iter = (
+        client.stream_chat_completion_reduced(
+            messages=messages, model=model, api_key=api_key, timeout=timeout
+        )
+        if provider == "deepseek"
+        else client.stream_chat_completion(
+            messages=messages, model=model, api_key=api_key, timeout=timeout
+        )
+    )
+
+    for chunk in stream_iter:
         # 部分实现会将 usage 置于最后一个 chunk（或与空 content 同时出现）
         if isinstance(chunk, dict):
             if "usage" in chunk and chunk.get("usage"):

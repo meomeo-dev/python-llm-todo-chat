@@ -25,6 +25,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .python-version
+debug*.py
 
 # Distribution / packaging
 .Python
