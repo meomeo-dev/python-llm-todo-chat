@@ -15,6 +15,18 @@
 
 ---
 
+## 效果预览
+
+<video src="./llm_todo.mp4" controls autoplay muted loop playsinline style="max-width: 760px; border: 1px solid #eaeaea; border-radius: 8px;">
+  您的浏览器不支持视频播放。您可以直接下载查看：
+  <a href="./llm_todo.mp4">llm_todo.mp4</a>
+  。
+  如自动播放被浏览器策略阻止，请手动点击播放按钮。
+  
+</video>
+
+---
+
 ## 安装与依赖
 
 要求：Python 3.10+（推荐 3.11/3.12）。

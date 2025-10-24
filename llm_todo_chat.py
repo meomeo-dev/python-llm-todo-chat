@@ -1346,7 +1346,7 @@ class DeepSeekClient:
         endpoint_url = (
             DEEPSEEK_ENDPOINT_BETA if need_beta else self.endpoint
         )
-        print(endpoint_url)
+
         return urllib.request.Request(
             endpoint_url, method="POST", data=data, headers=headers
         )
@@ -1360,7 +1360,7 @@ class DeepSeekClient:
         timeout: int = 600,
         extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """非流式调用，强制 max_token=1024，若 finish_reason=length 则以 prefix 续写，直到 stop。"""
+        """非流式调用，强制 max_tokens=1024，若 finish_reason=length 则以 prefix 续写，直到 stop。"""
         key = self._resolve_key(api_key)
 
         # 工作副本，避免外部列表被原地修改
@@ -1384,14 +1384,14 @@ class DeepSeekClient:
                 "model": model,
                 "messages": working_messages,
                 "stream": False,
-                "max_token": 1_024,  # 强制每轮 1024
+                "max_tokens": 1_024,  # 强制每轮 1024
             }
             if extra:
-                # 允许透传部分参数，但不允许覆盖 stream 与 max_token 的强制策略
+                # 允许透传部分参数，但不允许覆盖 stream 与 max_tokens 的强制策略
                 for k, v in extra.items():
                     if v is None:
                         continue
-                    if k in ("stream", "max_token"):
+                    if k in ("stream", "max_tokens"):
                         continue
                     payload[k] = v
 
@@ -1459,7 +1459,7 @@ class DeepSeekClient:
             "model": model,
             "messages": messages,
             "stream": True,
-            "max_token": (8 * 1_024),
+            "max_tokens": (8 * 1_024),
         }
         if stop:
             payload["stop"] = stop
@@ -1509,9 +1509,10 @@ class DeepSeekClient:
         timeout: int = 600,
         extra: Optional[Dict[str, Any]] = None,
         stop: Optional[list[str]|str] = None,
+        enforce_max_tokens: int = 2048,
     ) -> Generator[Dict[str, Any], None, None]:
         """
-        流式多轮续写：每轮强制 max_token=1024；当 finish_reason=length 时，以累计内容作为
+        流式多轮续写：每轮强制 max_tokens=2048；当 finish_reason=length 时，以累计内容作为
         assistant/prefix=True 的消息继续请求；仅在最终 stop 后输出 {"done": True}。
         透明透传 chunk，便于上层继续使用现有增量解析器。
         """
@@ -1522,12 +1523,32 @@ class DeepSeekClient:
         combined_content: str = ""
         prefix_index: Optional[int] = None
 
+        # 规范化与对齐 prefix：仅允许最后一条且 role=assistant 的消息带 prefix=True。
+        # 若调用方已提供该前缀消息，则作为续写起点，避免重复追加导致多个 prefix 消息。
+        try:
+            if working_messages:
+                # 移除非最后一条消息上的 prefix，避免 "prefix 非最后一条" 引发 400
+                for m in working_messages[:-1]:
+                    if isinstance(m, dict) and m.get("prefix"):
+                        m.pop("prefix", None)
+                # 若最后一条带 prefix 但角色不是 assistant，则移除该 prefix
+                last_msg = working_messages[-1]
+                if isinstance(last_msg, dict) and last_msg.get("prefix") and last_msg.get("role") != "assistant":
+                    last_msg.pop("prefix", None)
+                # 若最后一条即为 assistant 且带 prefix，则作为续写起点
+                last_msg = working_messages[-1]
+                if isinstance(last_msg, dict) and last_msg.get("prefix") and last_msg.get("role") == "assistant":
+                    prefix_index = len(working_messages) - 1
+                    combined_content = str(last_msg.get("content") or "")
+        except Exception:
+            pass
+
         while True:
             payload: Dict[str, Any] = {
                 "model": model,
                 "messages": working_messages,
                 "stream": True,
-                "max_token": 1_024,  # 强制每轮 1024
+                "max_tokens": enforce_max_tokens,  # 强制每轮 2048
             }
             if stop:
                 payload["stop"] = stop
@@ -1535,7 +1556,7 @@ class DeepSeekClient:
                 for k, v in extra.items():
                     if v is None:
                         continue
-                    if k in ("stream", "max_token"):
+                    if k in ("stream", "max_tokens"):
                         continue
                     payload[k] = v
 
@@ -6995,8 +7016,10 @@ def main() -> None:
             "deepseek-reasoner",
             "kimi-k2-turbo-preview",
             "kimi-k2-0711-preview",
+            "kimi-k2-0905-preview",
             "kimi-thinking-preview",
             # --- OpenRouter 示例模型 ---
+            "openai/gpt-5",
             "openai/gpt-5-mini",
             "openai/gpt-oss-120b",
             "deepseek/deepseek-r1-0528",
