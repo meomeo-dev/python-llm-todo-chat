@@ -17,13 +17,14 @@
 
 ## 效果预览
 
-<video src="./llm_todo.mp4" controls autoplay muted loop playsinline style="max-width: 760px; border: 1px solid #eaeaea; border-radius: 8px;">
-  您的浏览器不支持视频播放。您可以直接下载查看：
-  <a href="./llm_todo.mp4">llm_todo.mp4</a>
-  。
-  如自动播放被浏览器策略阻止，请手动点击播放按钮。
-  
-</video>
+<p align="center">
+  <img src="./Screenshot.png" alt="LLM Todo Chat 演示截图" style="max-width: 760px; border: 1px solid #eaeaea; border-radius: 8px;" />
+</p>
+
+<div style="padding: 8px 12px; background: #fff6e5; border: 1px solid #ffd59e; border-radius: 6px;">
+  <strong>查看演示视频：</strong>
+  GitHub README 不支持内联播放视频，请<a href="./llm_todo.mp4">点击此处下载或在新窗口播放 llm_todo.mp4</a>。
+</div>
 
 ---
 
