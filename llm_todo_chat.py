@@ -3354,9 +3354,10 @@ def build_user_bio_markdown() -> str:
     lines.append("")
     for b in bios:
         title = (b.get("title") or "").strip()
+        id = (b.get("id") or "").strip()
         content = (b.get("content") or "").strip()
         if title:
-            lines.append(f"### {title}")
+            lines.append(f"### {title}  (ID: {id})")
             lines.append("")
         if content:
             lines.append(content)
