@@ -2959,22 +2959,311 @@ def list_all() -> None:
         print()
 
 
-def search(query: str) -> None:
+def query_tasks(query: str) -> None:
+    """
+    Query tasks with simple field conditions and keywords.
+
+    Matching modes:
+      - field:value     -> fuzzy contains (case-insensitive)
+      - field==value    -> exact equality (case-insensitive)
+      - field!=value    -> exact inequality (case-insensitive)
+      - Bare words      -> fuzzy contains across title/notes/tags/project/status/id/time
+      - Negation of bare word: -word
+      - Negation of field:     -field:value (fuzzy) 或使用 field!=value（精确）
+      - Values can be quoted via shlex rules: title:"write design doc"
+
+    Supported fields:
+      status, project, tag/tags, id, time, title, notes,
+      date (YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD)
+
+    Examples:
+      - status:todo project:work tag:urgent report
+      - date:2025-10-01..2025-10-07 -status:done tag==ai
+      - title=="write doc" -tag:low
+    """
+    import shlex
+
+    tokens = shlex.split(query or "")
+
+    # Parsed constraints
+    include_keywords: List[str] = []
+    exclude_keywords: List[str] = []
+
+    # Fuzzy (:) includes/excludes
+    status_fz_incl: List[str] = []
+    status_fz_excl: List[str] = []
+    project_fz_incl: List[str] = []
+    project_fz_excl: List[str] = []
+    tag_fz_incl: List[str] = []
+    tag_fz_excl: List[str] = []
+    id_fz_incl: List[str] = []
+    id_fz_excl: List[str] = []
+    title_fz_incl: List[str] = []
+    title_fz_excl: List[str] = []
+    notes_fz_incl: List[str] = []
+    notes_fz_excl: List[str] = []
+    time_fz_incl: List[str] = []
+    time_fz_excl: List[str] = []
+
+    # Exact (== / !=) includes/excludes
+    status_eq_incl: List[str] = []
+    status_eq_excl: List[str] = []
+    project_eq_incl: List[str] = []
+    project_eq_excl: List[str] = []
+    tag_eq_incl: List[str] = []
+    tag_eq_excl: List[str] = []
+    id_eq_incl: List[str] = []
+    id_eq_excl: List[str] = []
+    title_eq_incl: List[str] = []
+    title_eq_excl: List[str] = []
+    notes_eq_incl: List[str] = []
+    notes_eq_excl: List[str] = []
+    time_eq_incl: List[str] = []
+    time_eq_excl: List[str] = []
+
+    date_start: Optional[datetime.date] = None
+    date_end: Optional[datetime.date] = None
+
+    def _to_date(s: str) -> Optional[datetime.date]:
+        try:
+            return datetime.date.fromisoformat(s)
+        except Exception:
+            return None
+
+    def _split_field_token(tok: str) -> tuple[bool, Optional[str], Optional[str], Optional[str]]:
+        """
+        Return (neg, field, op, value)
+        op in {':', '==', '!='}; bare word -> (neg?, None, None, word)
+        """
+        neg = False
+        s = tok
+        if tok.startswith("-"):
+            s = tok[1:]
+            # bare negative keyword
+            if all(op not in s for op in (":", "==", "!=")):
+                return True, None, None, s
+            neg = True
+
+        # operator priority: '!=' > '==' > ':'
+        for op in ("!=", "==", ":"):
+            if op in s:
+                field, val = s.split(op, 1)
+                return neg, field.strip() or None, op, val.strip()
+        # bare positive keyword
+        return False, None, None, s
+
+    # Parse tokens
+    for tok in tokens:
+        if not tok:
+            continue
+        neg, field, op, val = _split_field_token(tok)
+
+        # Bare keywords
+        if field is None and op is None:
+            (exclude_keywords if neg else include_keywords).append((val or "").lower())
+            continue
+
+        # Fielded filters
+        field = (field or "").lower()
+        if field == "date":
+            # date:YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD (only ':' supported for date)
+            if op not in (":",):
+                print("Invalid operator for date; use date:YYYY-MM-DD or date:YYYY-MM-DD..YYYY-MM-DD")
+                return
+            if ".." in val:
+                s1, s2 = val.split("..", 1)
+                ds = _to_date(s1.strip())
+                de = _to_date(s2.strip())
+                if not ds or not de:
+                    print("Invalid date filter: expected YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD")
+                    return
+                if ds > de:
+                    ds, de = de, ds
+                date_start, date_end = ds, de
+            else:
+                d = _to_date(val)
+                if not d:
+                    print("Invalid date filter: expected YYYY-MM-DD")
+                    return
+                date_start = d
+                date_end = d
+            continue
+
+        target = (val or "").lower()
+        # map field to buckets
+        def _push(fld: str, exact: bool, negative: bool, v: str) -> None:
+            if fld == "status":
+                (status_eq_excl if negative else status_eq_incl).append(v) if exact else \
+                (status_fz_excl if negative else status_fz_incl).append(v)
+            elif fld == "project":
+                (project_eq_excl if negative else project_eq_incl).append(v) if exact else \
+                (project_fz_excl if negative else project_fz_incl).append(v)
+            elif fld in ("tag", "tags"):
+                (tag_eq_excl if negative else tag_eq_incl).append(v) if exact else \
+                (tag_fz_excl if negative else tag_fz_incl).append(v)
+            elif fld == "id":
+                (id_eq_excl if negative else id_eq_incl).append(v) if exact else \
+                (id_fz_excl if negative else id_fz_incl).append(v)
+            elif fld == "title":
+                (title_eq_excl if negative else title_eq_incl).append(v) if exact else \
+                (title_fz_excl if negative else title_fz_incl).append(v)
+            elif fld == "notes":
+                (notes_eq_excl if negative else notes_eq_incl).append(v) if exact else \
+                (notes_fz_excl if negative else notes_fz_incl).append(v)
+            elif fld == "time":
+                (time_eq_excl if negative else time_eq_incl).append(v) if exact else \
+                (time_fz_excl if negative else time_fz_incl).append(v)
+            else:
+                # unknown field -> treat as keyword
+                (exclude_keywords if neg else include_keywords).append((fld + ":" + v).lower())
+
+        if op == "==":
+            _push(field, exact=True, negative=neg, v=target)
+        elif op == "!=":
+            # '!=' is exact-negative; ignore extra leading '-'
+            _push(field, exact=True, negative=True, v=target)
+        elif op == ":":
+            _push(field, exact=False, negative=neg, v=target)
+        else:
+            (exclude_keywords if neg else include_keywords).append((field + ":" + target).lower())
+
+    def _match(date_str: Optional[str], t: Dict[str, Any]) -> bool:
+        # Date range
+        if date_start or date_end:
+            if not date_str:
+                return False
+            try:
+                dd = datetime.date.fromisoformat(date_str)
+            except Exception:
+                return False
+            if date_start and dd < date_start:
+                return False
+            if date_end and dd > date_end:
+                return False
+
+        # prepare fields (lowercased)
+        status = str(t.get("status", "")).lower()
+        project = str(t.get("project", "")).lower()
+        tid = str(t.get("id", "")).lower()
+        title = str(t.get("title", "")).lower()
+        notes = str(t.get("notes", "")).lower()
+        timev = str(t.get("time", "")).lower()
+        tags_l = [str(x).lower() for x in (t.get("tags", []) or [])]
+
+        haystack_all = " ".join([title, notes, project, status, tid, timev, " ".join(tags_l)])
+
+        # Exact includes
+        for v in status_eq_incl:
+            if status != v:
+                return False
+        for v in project_eq_incl:
+            if project != v:
+                return False
+        for v in tag_eq_incl:
+            if v not in tags_l:
+                return False
+        for v in id_eq_incl:
+            if tid != v:
+                return False
+        for v in title_eq_incl:
+            if title != v:
+                return False
+        for v in notes_eq_incl:
+            if notes != v:
+                return False
+        for v in time_eq_incl:
+            if timev != v:
+                return False
+
+        # Fuzzy includes (substring)
+        for v in status_fz_incl:
+            if v not in status:
+                return False
+        for v in project_fz_incl:
+            if v not in project:
+                return False
+        for v in tag_fz_incl:
+            if not any(v in tg for tg in tags_l):
+                return False
+        for v in id_fz_incl:
+            if v not in tid:
+                return False
+        for v in title_fz_incl:
+            if v not in title:
+                return False
+        for v in notes_fz_incl:
+            if v not in notes:
+                return False
+        for v in time_fz_incl:
+            if v not in timev:
+                return False
+
+        # Exact excludes
+        for v in status_eq_excl:
+            if status == v:
+                return False
+        for v in project_eq_excl:
+            if project == v:
+                return False
+        for v in tag_eq_excl:
+            if v in tags_l:
+                return False
+        for v in id_eq_excl:
+            if tid == v:
+                return False
+        for v in title_eq_excl:
+            if title == v:
+                return False
+        for v in notes_eq_excl:
+            if notes == v:
+                return False
+        for v in time_eq_excl:
+            if timev == v:
+                return False
+
+        # Fuzzy excludes
+        for v in status_fz_excl:
+            if v in status:
+                return False
+        for v in project_fz_excl:
+            if v in project:
+                return False
+        for v in tag_fz_excl:
+            if any(v in tg for tg in tags_l):
+                return False
+        for v in id_fz_excl:
+            if v in tid:
+                return False
+        for v in title_fz_excl:
+            if v in title:
+                return False
+        for v in notes_fz_excl:
+            if v in notes:
+                return False
+        for v in time_fz_excl:
+            if v in timev:
+                return False
+
+        # Keyword includes/excludes across all fields (fuzzy)
+        for kw in include_keywords:
+            if kw not in haystack_all:
+                return False
+        for kw in exclude_keywords:
+            if kw in haystack_all:
+                return False
+
+        return True
+
     docs = safe_load_all(FILE)
-    found = 0
+    matched = 0
     for d in docs:
         date = d.get("date")
         for t in d.get("tasks", []):
-            txt = " ".join(filter(None, [t.get("title", ""), t.get("notes", "")]))
-            if (
-                query.lower() in txt.lower()
-                or query.lower() in " ".join(t.get("tags", [])).lower()
-            ):
-                found += 1
-                print(f"{date} [{t.get('status')}] {t.get('id')} {t.get('title')}")
-    if found == 0:
+            if _match(date, t):
+                matched += 1
+                print(f"date::{date} , status::[{t.get('status')}] , id::{t.get('id')} , title::{t.get('title')};")
+    if matched == 0:
         print("No matches")
-
 
 def complete(task_id: str, note_append: Optional[str] = None) -> None:
     docs = safe_load_all(FILE)
@@ -4996,10 +5285,21 @@ def tool__todo__list(date: Optional[str] = None) -> str:
     return _capture_print(list_tasks_for_date, d)
 
 
-def tool__todo__search(query: str) -> str:
-    """Search tasks by query across title, notes and tags"""
-    return _capture_print(search, query)
+def tool__todo__query(query: str) -> str:
+    """Query tasks by simple conditions.
 
+    Matching modes:
+      - field:value   -> fuzzy contains (case-insensitive)
+      - field==value  -> exact equality (case-insensitive)
+      - field!=value  -> exact inequality (case-insensitive)
+      - Bare words    -> fuzzy contains across title/notes/tags/project/status/id/time
+      - Negations     -> -word, -field:value (fuzzy), or field!=value (exact)
+      - Values can be quoted (shlex), e.g. title:"write design doc"
+
+    Supported fields:
+      status, project, tag/tags, id, time, title, notes, date (YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD)
+    """
+    return _capture_print(query_tasks, query)
 
 def tool__todo__complete(id: str, note: Optional[str] = None) -> str:
     """Complete a task by id, optionally appending a note"""
@@ -5237,6 +5537,7 @@ TOOLS_REGISTRY: Dict[str, Any] = {
     # Todo 工具
     "tool__todo__add_task": tool__todo__add_task,
     "tool__todo__list": tool__todo__list,
+    "tool__todo__query": tool__todo__query,
     "tool__todo__show": tool__todo__show,
     "tool__todo__complete": tool__todo__complete,
     "tool__todo__report_daily": tool__todo__report_daily,
@@ -7211,7 +7512,7 @@ def main() -> None:
     elif args.cmd == "list":
         list_tasks_for_date(args.date or datetime.date.today().isoformat())
     elif args.cmd == "search":
-        search(args.query)
+        query_tasks(args.query)
     elif args.cmd == "complete":
         complete(args.id, note_append=args.note)
     elif args.cmd == "update":
