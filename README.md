@@ -26,28 +26,16 @@
   GitHub README 不支持内联播放视频，请<a href="./llm_todo.mp4">点击此处下载或在新窗口播放 llm_todo.mp4</a>。
 </div>
 
+
+## 更多案例 
+
+[案例介绍](案例介绍.md)
+
 ---
 
 ## 安装与依赖
 
 要求：Python 3.10+（推荐 3.11/3.12）。
-
-安装示例（zsh）：
-
-可以按提示直接使用 [uv](https://github.com/astral-sh/uv)（更快的包管理），或继续使用 pip。
-
-```zsh
-uv venv
-source .venv/bin/activate
-uv pip install -e .
-```
-
-若缺少依赖，程序会提示类似：
-```
-缺少依赖，请先安装:
-
-  uv pip install pyyaml python-dateutil ...
-```
 
 ---
 
@@ -60,8 +48,43 @@ brew install pipx
 pipx install git+https://github.com/meomeo-dev/python-llm-todo-chat.git
 # pipx 会将其安装到虚拟环境后，然后挂在 ~/.local/bin 目录下
 
-# 安装完成后可直接执行
-llm_todo_chat --help
+# 环境变量 API_KEY
+ export DEEPSEEK_API_KEY = "..."
+ export JINA_API_KEY = "..."
+
+# 运行
+llm_todo_chat invoke --interactive --provider deepseek --model deepseek-chat --role deep-researcher --stream
+```
+
+---
+
+或者下载源代码后（zsh）：
+
+可以按提示直接使用 [uv](https://github.com/astral-sh/uv)，或继续使用 pip。
+
+```zsh
+# 克隆仓库
+git clone https://github.com/meomeo-dev/python-llm-todo-chat.git
+cd python-llm-todo-chat
+
+# 创建虚拟环境并安装依赖
+uv venv
+source .venv/bin/activate
+uv sync
+
+# 环境变量 API_KEY
+ export DEEPSEEK_API_KEY = "..."
+ export JINA_API_KEY = "..."
+
+# 运行
+python3 llm_todo_chat.py invoke --interactive --provider deepseek --model deepseek-chat --role deep-researcher --stream
+```
+
+若缺少依赖，程序会提示类似：
+```
+缺少依赖，请先安装:
+
+  uv pip install pyyaml python-dateutil ...
 ```
 
 ---
@@ -74,9 +97,18 @@ llm_todo_chat --help
 llm_todo_chat --help
 ```
 
-配置API_KEY
+### 配置API_KEY
 
 命令前加一个空格，避免密钥被记录到 history 里。
+
+通过环境变量配置
+
+```
+ export DEEPSEEK_API_KEY = "..."
+ export JINA_API_KEY = "..."
+```
+
+或 MacOS 通过命令参数配置, 会存储到 keychain 中
 
 ```
  llm_todo_chat config-api --deepseek-key <替换为你的API_KEY>
@@ -84,9 +116,27 @@ llm_todo_chat --help
  llm_todo_chat config-api --jina-key <替换为你的API_KEY>
 ```
 
-管理工具 则直接代码中搜索`TOOLS_REGISTRY`注释掉即可，需要新工具则实现函数后添加进去即可。
+### 交互式对话（可自动调用工具）
 
-MCP配置依赖于 FASTMCP, JSON 配置格式于 FAST MCP保持一样格式。
+内置三类角色（通过 `--role` 选择，对应注入不同身份提示词）：
+1. `default`：时间/任务结构化调度角色（强调拆分、排序、执行一致性）
+2. `deep-researcher`：深度研究循环（假设 -> 检索 -> 抽取 -> 反思 -> 迭代），自动强调微步迭代与证据链构建
+3. `game-roleplay`：沉浸式角色扮演导演（剧情节奏、人设一致、安全/OOC 规范）
+
+```zsh
+llm_todo_chat invoke --interactive --provider deepseek --model deepseek-chat --role deep-researcher --stream
+```
+
+对话内命令：`/tools` 查看工具签名、`/system` 查看系统提示、`/turns` 查看流水、`/undo` 撤销上一轮、`/del N` 删除第 N 轮、`/exit` 退出。
+
+
+### 管理内置工具 
+
+直接代码中搜索`TOOLS_REGISTRY`注释掉即可，需要新工具则实现函数后添加进去即可。
+
+### MCP配置
+
+依赖于 FASTMCP, JSON 配置格式与 FAST MCP 保持一样格式。
 
 ```
 {
@@ -104,19 +154,15 @@ MCP配置依赖于 FASTMCP, JSON 配置格式于 FAST MCP保持一样格式。
 }
 ```
 
-交互式对话（可自动调用工具）：
+## 数据结构说明
 
-```zsh
-llm_todo_chat invoke --interactive --provider deepseek --model deepseek-reasoner --role deep-researcher --stream
-```
-
-查看相关配置文件路径：
+### 查看相关配置文件路径
 
 ```zsh
 llm_todo_chat paths
 ```
 
-## todo.yaml 数据结构
+### Todo（存于 `llm_todo_chat.txt`） 数据结构
 
 一个文件内有多份 YAML 文档，使用 `---` 分隔。每份文档（Document）：
 
@@ -134,7 +180,7 @@ tasks:
 
 程序会为缺省字段补默认值，状态不合法会回落到 `todo` 状态。
 
-Bio 条目（存于 `llm_todo_chat__bio.yaml`）示例：
+### Bio 条目（存于 `llm_todo_chat__bio.yaml`）数据结构
 
 ```yaml
 version: 1
@@ -150,26 +196,29 @@ bios:
 
 ---
 
-## 环境变量与平台集成
+## 环境变量
+
+### API密钥
 
 - DeepSeek Key：`DEEPSEEK_API_KEY`
-- MoonShot Key：`MOONSHOT_API_KEY`
 - OpenRouter Key：`OPENROUTER_API_KEY`
 - Jina Key：`JINA_API_KEY`
 
 使用 `config-api` 写入钥匙串(MacOS)：
 
 ```zsh
-llm_todo_chat config-api --deepseek-key sk-xxx --jina-key jina_xxx
+ llm_todo_chat config-api --deepseek-key sk-xxx --jina-key jina_xxx
 ```
 
-交互补全历史裁剪：
+### 一些预设但没完全实现的环境变量
+
+(实现)交互补全历史裁剪：
 
 - `TODO_HISTORY_DISABLE=1` 关闭历史文件
 - `TODO_HISTORY_MAX_LINES` 默认 20000
 - `TODO_HISTORY_MAX_BYTES` 默认 5,000,000
 
-流式渲染性能：
+(未实现)流式渲染性能：
 
 - `TODO_STREAM_MIN_INTERVAL`（默认 0.08s）
 - `TODO_STREAM_MIN_DELTA_CHARS`（默认 256）
@@ -181,60 +230,72 @@ llm_todo_chat config-api --deepseek-key sk-xxx --jina-key jina_xxx
 
 ---
 
-## 交互式对话与工具调用（ANTML）
-
-进入对话：
-
-```zsh
-python llm_todo_chat.py invoke --interactive --role default --stream
-```
-
-对话内命令：`/tools` 查看工具签名、`/system` 查看系统提示、`/turns` 查看流水、`/undo` 撤销上一轮、`/del N` 删除第 N 轮、`/exit` 退出。
+## 交互式对话与工具调用 ANTML 格式说明
 
 模型在需要用工具时，输出如下结构，程序会自动解析与执行：
 
 ```xml
 <antml:function_calls>
   <antml:invoke name="tool__todo__add_task">
-    <antml:parameter name="commentary"><![CDATA[为什么要调用]]></antml:parameter>
+    <antml:parameter name="request_sig"><![CDATA[签名]]></antml:parameter>
+    <antml:parameter name="commentary"><![CDATA[Agent为什么要调用]]></antml:parameter>
     <antml:parameter name="title"><![CDATA[买牛奶]]></antml:parameter>
     <antml:parameter name="time"><![CDATA[18:00]]></antml:parameter>
   </antml:invoke>
 </antml:function_calls>
 ```
 
-- `commentary` 仅用于展示，不会传入工具执行。
-- 工具调用与结果会被记录入 SQLite，会话会多轮循环“调用 -> 注入结果 -> 继续追问”。
-- 最大轮次：深度研究模式 6 轮，其它 2 轮（可改代码常量）。
+**invoke**
+
+invoke 使用 3 段式设计, 对工具和能力的调用能较好的区分作用域. `__` 使用两个下划线作为作用域分隔符.
+
+```
+[工具箱]__[工具]__[功能]
+```
+
+目前的工具箱有 3 类:
+- 内置工具箱 -> `tool`
+- MCP工具箱 -> `mcp`
+- 仿生工具箱 -> `bionic`
+
+`request_sig` 特殊说明: 
+Agent发起请求必须要给请求一个命名. 
+就像程序代码中的函数名或变量名一样, 通过命名开辟一个逻辑上的内存空间 或 计算空间,
+这个很必要, Agent通过 `request_sig` 在语境上开辟了一个记忆空间.
+
+`commentary` 仅用于展示，可以理解为Agent的快思考, 不会传入工具执行。
+
+
+工具调用的最大轮次：深度研究模式 6 + MAX_TOOL_ROUNDS_MIN_BOUNDARY 轮，其它 0 + MAX_TOOL_ROUNDS_MIN_BOUNDARY 轮（可改代码常量）。
 
 ---
 
 ## 可用工具（注册于 TOOLS_REGISTRY）
 
-说明：以下为默认已注册工具。若要禁用某工具，可在 `llm_todo_chat.py` 中注释其条目；要新增工具，按现有 wrapper 模式实现函数并加入 `TOOLS_REGISTRY`。`tool__todo__search` 已实现但默认未注册（避免模型过度泛搜），可按需放开。
+说明：以下为默认已注册工具。若要禁用某工具，可在 `llm_todo_chat.py` 中注释其条目；要新增工具，按现有 wrapper 模式实现函数并加入 `TOOLS_REGISTRY`。
 
-Bio：
-- `tool__bio__add(title, content, tags?)`
-- `tool__bio__update(id, title?, content?, tags?)`
-- `tool__bio__delete(id)`
-- `tool__bio__list()`
+Bio：(类似于长期记忆, 只不过是命名上“生平传记(Biography)” 命名更好的反映在AI眼中用户是一个怎么样的人.)
+- `tool__bio__add(title, content, tags?)` 新增用户生平传记记录
+- `tool__bio__update(id, title?, content?, tags?)` 更新用户生平传记记录
+- `tool__bio__delete(id)` 删减用户生平传记记录
+- `tool__bio__list()` 列出用户生平传记记录
 
 Todo：
-- `tool__todo__add_task(title, time?, project?, tags?, notes?)`
-- `tool__todo__list(date?)` （支持 `YYYY-MM-DD` 单日 或 `YYYY-MM-DD..YYYY-MM-DD` 区间）
-- `tool__todo__complete(id, note?)`
-- `tool__todo__report_daily(date?)`
-- `tool__todo__report_weekly(start?)` （周一 ISO 日期）
-- `tool__todo__update(id, title?, time?, status?, project?, tags?, notes?, note_append?)`
-- `tool__todo__delete(id)`
-  * 可选未默认启用：`tool__todo__search(query)` – 全文/标签模糊搜索
+- `tool__todo__add_task(title, time?, project?, tags?, notes?)`  新增代办
+- `tool__todo__list(date?)` （支持 `YYYY-MM-DD` 单日 或 `YYYY-MM-DD..YYYY-MM-DD` 区间）列出指定日期的所有代办
+- `tool__todo__complete(id, note?)` 完成代表
+- `tool__todo__report_daily(date?)` 日报
+- `tool__todo__report_weekly(start?)` （周一 ISO 日期）周报
+- `tool__todo__update(id, title?, time?, status?, project?, tags?, notes?, note_append?)` 更新代办
+- `tool__todo__delete(id)` 删除代办
+* `tool__todo__query(query)` 全文搜索代办
 
 Jina：
 - `tool__jina__web_search(query)`：仅支持普通关键字（不支持 `site:` / 引号 / 布尔语法等），默认返回 no-content 摘要
 - `tool__jina__fetch_markdown(url, token_budget?)`：抓取网页并返回 Markdown（`token_budget` 16_000–32_000）
 
-Reflect（对话结构化反思与重置）：
-- `tool__reflect__negate_and_reflect(first_user?, inherited?, next_direction?, current_status?, style?)`
+Reflect（对话结构化反思与重置, 实验性）：
+- `tool__reflect__negate_and_reflect(first_user?, inherited?, next_direction?, current_status?, style?)` 抛弃所有历史对话, 携带历史对话中最重要的信息进入新的轮次.
 
 Human / 文件：
 - `tool__human__input(prompt, default?, kind?)`：human-in-loop 输入（kind: text|confirm|secret）
@@ -250,59 +311,11 @@ Safety：
   * `op=add` 需要 `date, interval`，`interval` 支持组合如 `1y2m-3d` / `10d 2w`
 
 MCP（多服务器工具桥接）：
-- `tool__mcp__call(server, tool, params_json?, raw?)`：调用已配置 MCP 服务器工具
-- `tool__mcp__list(server?, json_mode?)`：列出可用 MCP 工具（可按 server 过滤）
+- `mcp__call(server, tool, params_json?, raw?)`：调用已配置 MCP 服务器工具
+- `mcp__list(server?, json_mode?)`：列出可用 MCP 工具（可按 server 过滤）
 
----
-
-## DeepSeek / Jina 集成
-
-DeepSeek：
-- 非流式：返回完整文本与 `usage`
-- 流式：分离 `reasoning_content` 与 `content` 回调输出；末尾汇总 `usage`
-- 会自动把 System Header（知识截止、当前日期时间）与用户 Bio Markdown 注入到 System Prompt 前。
-
-Jina：
-- 搜索：`s.jina.ai` （no-content 摘要）
-- Reader：`r.jina.ai`，返回 Markdown（默认设置 `X-Return-Format: markdown` 与 `X-Token-Budget: 16000`，可通过工具参数提升上限到 32000）
-
-API Key 解析优先级：显式参数 > 文件内常量（仅 DeepSeek 可选占位）> 环境变量 > macOS 钥匙串。
-
-MCP 相关：
-- 配置文件：`~/llm_todo_chat__mcp_servers.json`（字段结构：`{"mcpServers": { name: {transport, command, args, env, timeout}}}`）
-- 环境变量 `TODO_MCP_NO_BANNER=1` 可自动为 fastmcp 启动命令注入 `--no-banner`
-- 使用工具：`tool__mcp__list` 查看，`tool__mcp__call` 调用具体远程工具
-
----
-
-## 会话与数据持久化结构
-
-SQLite 表结构（自动创建，路径 `~/.llm_todo_chat.duckdb`）：
-
-- `sessions`：记录一次交互式会话（uuid / started_at / ended_at / role / model / theme / system_hash）
-- `messages`：对话消息流水（包含 reasoning 分离内容与 usage token）
-- `tool_calls`：模型输出的工具调用（round_index 支持同一轮多次循环）
-- `tool_results`：工具执行回注的结果内容
-
-这样便于：
-1. 复盘会话推理链与工具使用序列
-2. 统计工具调用频率、模型 token 使用情况
-3. 构建后续的检索增强或回放功能
-
----
-
-## 角色身份提示词（Role Identity Prompts）
-
-内置三类角色（通过 `--role` 选择，对应注入不同身份提示词）：
-
-1. `default`：时间/任务结构化调度角色（强调拆分、排序、执行一致性）
-2. `deep-researcher`：深度研究循环（假设 -> 检索 -> 抽取 -> 反思 -> 迭代），自动强调微步迭代与证据链构建
-3. `game-roleplay`：沉浸式角色扮演导演（剧情节奏、人设一致、安全/OOC 规范）
-
-选择示例：
-```zsh
-llm_todo_chat invoke --interactive --provider deepseek --model deepseek-reasoner --role deep-researcher --stream
-```
+仿生:
+- `bionic__speech__say(content, say_all?)`：说话能力, 调用 MacOS 的 Say 命令使用 Siri 完成语音播报
 
 ---
 

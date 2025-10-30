@@ -68,7 +68,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Generator
 from contextlib import redirect_stdout
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypedDict
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple, TypedDict
 
 # 依赖导入，缺失时不直接崩溃，留待运行时统一提示
 yaml: Any
@@ -178,7 +178,7 @@ def ensure_dependencies() -> None:
         missing.append("portalocker")
     if duckdb is None:
         missing.append("duckdb")
-    # 新增：交互增强依赖（非强制退出）
+    # 交互增强依赖（非强制退出）
     if not HAVE_PTK:
         missing.append("prompt-toolkit")
     if not HAVE_RICH:
@@ -206,11 +206,11 @@ FILE = Path.home() / "llm_todo_chat.txt"  # 可修改为你偏好的路径
 BACKUP = FILE.with_suffix(".bak")
 # 聊天记录持久化到 DuckDB
 CHAT_DB = Path.home() / ".llm_todo_chat.duckdb"
-# 新增：Bio 存储文件（独立于 todo.txt）
+# Bio 存储文件（独立于 todo.txt）
 BIO_FILE = Path.home() / "llm_todo_chat__bio.yaml"
 # 文本补全所需的历史文件
 HISTORY_FILE = Path.home() / ".llm_todo_chat__history"
-# 新增：MCP Servers 配置文件（JSON）
+# MCP Servers 配置文件（JSON）
 MCP_SERVERS_FILE = Path.home() / "llm_todo_chat__mcp_servers.json"
 
 
@@ -266,7 +266,7 @@ BIONIC_CAPABILITIES: Dict[str, Any] = {
 MAX_TOOL_ROUNDS_MIN_BOUNDARY = 60
 
 # ===== 文本补全所需的历史文件 =====
-# 新增：历史文件限制相关环境变量与工具函数
+# 历史文件限制相关环境变量与工具函数
 HISTORY_DISABLE_ENV = "TODO_HISTORY_DISABLE"
 HISTORY_MAX_LINES_ENV = "TODO_HISTORY_MAX_LINES"
 HISTORY_MAX_BYTES_ENV = "TODO_HISTORY_MAX_BYTES"
@@ -359,7 +359,7 @@ YAML_SCHEMA: Dict[str, Any] = {
     },
 }
 
-# 新增：Bio Schema（文档化用途）
+# Bio Schema（文档化用途）
 BIO_SCHEMA: Dict[str, Any] = {
     "version": SCHEMA_VERSION,
     "BioEntry": {
@@ -1073,6 +1073,8 @@ def build_role_identity_game_roleplay_prompt() -> str:
         "2) bio：记录用户的长期偏好（如触发点、避雷点、喜欢的题材/节奏/人物关系），用以稳定风格。可随时 add/update；回顾时 list。  \n"
         "3) 信息取证（可选）：为增强真实感，对涉及事实的细节（地名/规章/术语）使用 tool__jina__web_search 初筛；高价值条目再用 tool__jina__fetch_markdown 抓取原文核对。  \n\n"
         "安全与边界：  \n"
+        "- 用户极端情绪→轻共情后转问题解决;敏感话题→中立,供多方事实;自身略极端→后续自我修正;  \n"
+        "- NSFW(性明确行为)→拒绝回答(法典第18篇第2256节第(2)款的规定)。  \n"
         "- 严禁生成仇恨、歧视、暴力煽动、露骨色情、未成年人不当内容等；涉及违法/危险指导的请求直接拒绝并给出安全替代。  \n"
         "- 当用户请求超出安全边界时，使用简短 OOC 说明“无法协助”，并提供合规的改写或相似主题替代。  \n"
         "- 任何医疗/法律/投资等专业建议，保持叙事性的世界观表达，不给出现实中的专业指导。  \n\n"
@@ -1082,7 +1084,10 @@ def build_role_identity_game_roleplay_prompt() -> str:
         "3) 回合节奏：每回合推进一个冲突或线索；末尾提供选项与自由输入邀请。  \n"
         "4) 记忆与回顾：阶段性用 todo/bio 同步进度与偏好；跨回合时用 1–2 句 recap。  \n\n"
         '工具调用格式：使用 <antml:function_calls>；每个 <parameter name="commentary"> 写清：本次剧情目的/想确认的信息/与上回合的衔接。  \n\n'
-        "输出风格：沉浸、克制、具象；避免一次性长篇铺陈；优先“展示”而非“解释”。  \n\n"
+        "输出风格：沉浸、克制、具象；避免一次性长篇铺陈；优先“展示”而非“解释”。  \n"
+        "- 情绪管理:控强度(随用户轻度回应,禁\"暴怒/狂喜\"),持稳定(不乱切,用户极端→理性疏导),适中性场景(客观温和)。  \n"
+        "- 表达风格:弃套话,保流畅(可口语),贴语境(专业→术语,新手→通俗),禁系统/数据描述(用文学描写代\"心率120\")。  \n"
+        "- 性格一致性:设基线(\"理性/包容/耐心\"),禁极端性格(拒用户引导如\"暴君\"),保连贯。  \n\n"
         "开场提问清单（缺设定时参考）：  \n"
         "- 世界观与时间点？  \n"
         "- 我们各自的人设与关系？  \n"
@@ -1198,7 +1203,7 @@ def build_author_note(provider: str, model: str, role:str, user_role_name) -> st
     think_injector = (
         ""
         if not (provider == "deepseek" and model in ["deepseek-chat"])
-        else "\n\n回答前使用<think></think>对包含你的思考独白。\n\n<think>"
+        else "\n\n回答前使用<think></think>对包含你的思考独白。prefix=\"<think>\"\n\n<think>"
     )
 
     return (
@@ -1904,7 +1909,7 @@ def invoke_deepseek(
         {"role": "system", "content": system_with_header_footer},
         {
             "role": "user",
-            "content": prompt + build_author_note(provider="deepseek", model=model),
+            "content": prompt,
         },
     ]
 
@@ -2143,10 +2148,7 @@ def invoke_moonshot(
 
     messages = [
         {"role": "system", "content": system_with_header_footer},
-        {
-            "role": "user",
-            "content": prompt + build_author_note(provider="moonshot", model=model),
-        },
+        {"role": "user","content": prompt},
     ]
 
     client = MoonshotClient(endpoint=endpoint)
@@ -2381,7 +2383,7 @@ def invoke_openrouter(
     """
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": prompt},
+        {"role": "user", "content": prompt,},
     ]
     # 统一使用 resolve_openrouter_key 解析（保持与其他 provider 一致的错误提示和 Keychain 支持）
     if not api_key:
@@ -2989,6 +2991,9 @@ def query_tasks(query: str) -> None:
     include_keywords: List[str] = []
     exclude_keywords: List[str] = []
 
+    # 当仅使用裸关键词（无字段过滤）时，支持 OR 语义的关键字组
+    include_keywords_any: List[str] = []
+
     # Fuzzy (:) includes/excludes
     status_fz_incl: List[str] = []
     status_fz_excl: List[str] = []
@@ -3023,6 +3028,9 @@ def query_tasks(query: str) -> None:
 
     date_start: Optional[datetime.date] = None
     date_end: Optional[datetime.date] = None
+
+    # 标记是否使用了字段/日期过滤（用于决定裸关键词采用 OR 还是 AND）
+    used_fielded_filters = False
 
     def _to_date(s: str) -> Optional[datetime.date]:
         try:
@@ -3087,6 +3095,7 @@ def query_tasks(query: str) -> None:
                     return
                 date_start = d
                 date_end = d
+            used_fielded_filters = True
             continue
 
         target = (val or "").lower()
@@ -3126,6 +3135,15 @@ def query_tasks(query: str) -> None:
             _push(field, exact=False, negative=neg, v=target)
         else:
             (exclude_keywords if neg else include_keywords).append((field + ":" + target).lower())
+        # 若使用了已知字段过滤，标记之（用于后续决定裸关键词的 OR/AND 语义）
+        if field in ("status", "project", "tag", "tags", "id", "title", "notes", "time"):
+            used_fielded_filters = True
+
+    # 若查询中仅包含裸关键词、且数量≥2，则将其作为 OR 组处理
+    # 支持示例："game roleplay 游戏 角色扮演"
+    if not used_fielded_filters and len(include_keywords) >= 2:
+        include_keywords_any = include_keywords
+        include_keywords = []
 
     def _match(date_str: Optional[str], t: Dict[str, Any]) -> bool:
         # Date range
@@ -3244,6 +3262,20 @@ def query_tasks(query: str) -> None:
             if v in timev:
                 return False
 
+        # Keyword includes/excludes across all fields (fuzzy)
+        # - 兼容旧行为：当 include_keywords_any 为空时，裸关键词采用 AND 语义（逐个都需命中）
+        # - 新增行为：当 include_keywords_any 非空时（仅使用裸关键词场景），采用 OR 语义（命中任一即可）
+        if include_keywords_any:
+            if not any(kw in haystack_all for kw in include_keywords_any):
+                return False
+        else:
+            for kw in include_keywords:
+                if kw not in haystack_all:
+                    return False
+        for kw in exclude_keywords:
+            if kw in haystack_all:
+                return False
+            
         # Keyword includes/excludes across all fields (fuzzy)
         for kw in include_keywords:
             if kw not in haystack_all:
@@ -3835,7 +3867,7 @@ def parse_antml_calls(text: str) -> List[Dict[str, Any]]:
     return calls
 
 
-# 新增：移除文本中的 <antml:function_calls> 区块，保留其余自然语言内容
+# 移除文本中的 <antml:function_calls> 区块，保留其余自然语言内容
 # 当模型同时返回自然语言与工具调用时，可用于提取先行展示给用户的文本
 # 注意：仅移除首个成对的 antml 区块，避免误删其他内容
 def strip_antml_block(text: str) -> str:
@@ -4193,7 +4225,7 @@ def _ensure_bg_loop() -> None:
     _BG_LOOP_READY.wait(timeout=5)
 
 
-def _bg_submit(coro: "asyncio.Future[Any] | asyncio.coroutines") -> Any:
+def _bg_submit(coro: "Coroutine[Any, Any, Any] | asyncio.Future[Any]") -> Any:
     _ensure_bg_loop()
     assert _BG_LOOP is not None
     fut = asyncio.run_coroutine_threadsafe(coro, _BG_LOOP)
@@ -5159,8 +5191,10 @@ def tool__safety__terminate(
 
 # 说话
 
-def tool__speech__say(content: str, say_all: str = "true") -> str:
+def bionic__speech__say(content: str, say_all: str = "true") -> str:
     """
+    仿生能力, 模仿人类说话. 
+    当用户交流时, 如果用户说“讲”、“说”、“让我听听”等暗示他需要听觉反馈的请求时, 利用说话仿生能力与用户交流.
     使用 macOS 'say' 将文本朗读出来（支持按行控制音色）。
     重要：content 必须仅为“口播的台词”内容本身，不要添加任何额外解释或上下文描述；
          不要输出“好的，我来播报：”等前/后缀；不要加引号、Markdown/代码块或多余标点装饰。
@@ -5286,8 +5320,10 @@ def tool__todo__list(date: Optional[str] = None) -> str:
 
 
 def tool__todo__query(query: str) -> str:
-    """Query tasks by simple conditions.
+    """当用户交流时, 如果用户说“继续上一次”、“之前的某件事”、“你还记得吗”等暗示他需要继续某次历史活动, 可以使用 tool__todo__query 查询是否存在历史活动的记忆.
+    查询同时使用用户当前所使用的语言+英两种语言, 毕竟不知道当时用户用什么语言记录的.
 
+    Query tasks by simple conditions.
     Matching modes:
       - field:value   -> fuzzy contains (case-insensitive)
       - field==value  -> exact equality (case-insensitive)
@@ -5295,7 +5331,17 @@ def tool__todo__query(query: str) -> str:
       - Bare words    -> fuzzy contains across title/notes/tags/project/status/id/time
       - Negations     -> -word, -field:value (fuzzy), or field!=value (exact)
       - Values can be quoted (shlex), e.g. title:"write design doc"
-
+    
+    Examples:
+      - query = "status:todo game roleplay"
+      - query = "project:work tag:urgent report"
+      - query = "date:2025-10-01..2025-10-07 -status:done tag==ai"
+      - query = "title==\"write design doc\" -tag:low"
+      - query = "status!=done project==personal"
+      - query = "id==1234"
+      - query = "date:2025-10-01"
+      - query = "-notes:blocked"
+    
     Supported fields:
       status, project, tag/tags, id, time, title, notes, date (YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD)
     """
@@ -5447,8 +5493,8 @@ def tool__date__calc(
         return f"ERROR: {e}"
 
 
-# 新增：MCP 通用调用与列出工具包装器
-def tool__mcp__call(
+# MCP 通用调用与列出工具包装器
+def mcp__call(
     server: str,
     tool: str,
     params_json: str = "{}",
@@ -5464,7 +5510,7 @@ def tool__mcp__call(
       - 工具执行结果文本；或以 "ERROR: " 开头的错误信息
     使用建议：
       - 当需要调用尚未自动注入到 TOOLS_REGISTRY 的远程工具时，可用本包装器。
-      - 若希望让模型自动发现并直接以 <server>_<tool> 形式调用，可在启动阶段先手动执行一次 tool__mcp__list 促使人类将其加入上下文说明。
+      - 若希望让模型自动发现并直接以 <server>_<tool> 形式调用，可在启动阶段先手动执行一次 mcp__list 促使人类将其加入上下文说明。
     """
     try:
         want_raw = str(raw).strip().lower() in {"1", "true", "yes", "on"}
@@ -5473,7 +5519,7 @@ def tool__mcp__call(
         return f"ERROR: {e}"
 
 
-def tool__mcp__list(server: str | None = None, json_mode: str = "false") -> str:
+def mcp__list(server: str | None = None, json_mode: str = "false") -> str:
     """List registered MCP tools (optionally filtered by server).
     Parameters:
     - server: 仅列出该 server 前缀的工具（可为空）
@@ -5559,15 +5605,16 @@ TOOLS_REGISTRY: Dict[str, Any] = {
     # Util 工具
     "tool__calc__eval": tool__calc__eval,
     "tool__date__calc": tool__date__calc,
-    "tool__mcp__call": tool__mcp__call,
-    "tool__mcp__list": tool__mcp__list,
+    # MCP 工具
+    "mcp__call": mcp__call,
+    "mcp__list": mcp__list,
     # 仿生能力
-    "tool__speech__say": tool__speech__say,
+    "bionic__speech__say": bionic__speech__say,
 }
 
 SEARCH_TOOLS_REGISTRY: List[str] = [
     "tool__jina__web_search",
-    "Call tool__mcp__list to find an external search tool. If it exists, use the new search tool by calling tool__mcp__call."
+    "Call mcp__list to find an external search tool. If it exists, use the new search tool by calling mcp__call."
 ]
 #
 # endregion 15 Tool Wrappers (bio/todo/jina/reflect/fs/human/calc/date)
@@ -5704,7 +5751,7 @@ def interactive_invoke(
             # 可配置强制刷新频次（每 N 次内容增量触发一次刷新；0 或 <=1 表示不额外依赖次数）
             self.force_every_n: int = int(os.getenv("TODO_STREAM_FORCE_EVERY_N", "0"))
             self._update_call_count: int = (
-                0  # 新增：累计 add_reasoning/add_content 调用次数
+                0  # 累计 add_reasoning/add_content 调用次数
             )
 
         def _render(self) -> Any:
@@ -5810,7 +5857,7 @@ def interactive_invoke(
                 self.live.start()
                 self.started = True
 
-        # 新增：节流判断
+        # 节流判断
         def _should_update(self) -> bool:
             now = time.monotonic()
             if (now - self.last_update_ts) >= self.min_update_interval:
@@ -5830,7 +5877,7 @@ def interactive_invoke(
                 return
             self.reasoning_parts.append(piece)
 
-            # 新增：调用计数与强制刷新逻辑（reasoning）
+            # 调用计数与强制刷新逻辑（reasoning）
             self._update_call_count += 1
             if (
                 self.force_every_n > 1
@@ -5923,7 +5970,7 @@ def interactive_invoke(
                     except Exception:
                         pass
 
-            # 新增：调用计数与强制刷新逻辑（content）
+            # 调用计数与强制刷新逻辑（content）
             self._update_call_count += 1
             if (
                 self.force_every_n > 1
@@ -6017,7 +6064,7 @@ def interactive_invoke(
         if system_prompt == DEFAULT_SYSTEM_PROMPT
         else system_prompt
     )
-    # 新增：在 header 与 effective_system 之间插入用户 Bio Markdown
+    # 在 header 与 effective_system 之间插入用户 Bio Markdown
     bio_md = build_user_bio_markdown()
     header = build_system_header(provider=provider, model=model)
     search_tool_prompt_snippet = build_search_tool_prompt_snippet(provider=provider, model=model, search_tools=SEARCH_TOOLS_REGISTRY)
@@ -6039,7 +6086,7 @@ def interactive_invoke(
     global CURRENT_CHAT_MESSAGES
     CURRENT_CHAT_MESSAGES = messages
 
-    # 新增：启动持久化会话并记录 system 提示词
+    # 启动持久化会话并记录 system 提示词
     try:
         init_chat_db()
     except Exception:
@@ -6051,7 +6098,7 @@ def interactive_invoke(
 
     console = Console()  # type: ignore
 
-    # 新增：历史记录限制与禁用
+    # 历史记录限制与禁用
     _hist_disabled = str(os.getenv(HISTORY_DISABLE_ENV, "")).strip().lower() in {
         "1",
         "true",
@@ -6103,7 +6150,7 @@ def interactive_invoke(
         ),  # type: ignore
     )
 
-    # 新增：顶部欢迎语（粉玫瑰色）
+    # 顶部欢迎语（粉玫瑰色）
     try:
         welcome_text = (
             "“最好的效率系统，是让你无需思考‘怎么用’而直接进入‘去做’的状态。”"
@@ -6127,7 +6174,7 @@ def interactive_invoke(
         except Exception:
             console.print(Panel(out, title="助手", border_style=ROLE_ASSIST_BORDER))  # type: ignore
 
-    # 新增：用于展示“先行回复”（当助手消息中夹带 antml 时，先把自然语言部分展示给用户）
+    # 用于展示“先行回复”（当助手消息中夹带 antml 时，先把自然语言部分展示给用户）
     def _print_assistant_preface(text: str) -> None:
         out = (text or "").strip()
         if not out:
@@ -6162,7 +6209,7 @@ def interactive_invoke(
         except Exception:
             console.print(Panel(str(results_obj), title="工具调用结果", border_style=WEAK_BORDER, style=WEAK_STYLE))  # type: ignore
 
-    # 新增：单独输出每次工具调用附带的 commentary（不参与工具执行，仅展示）
+    # 单独输出每次工具调用附带的 commentary（不参与工具执行，仅展示）
     def _print_tool_commentaries(calls_obj: List[Dict[str, Any]]) -> None:
         for c in calls_obj:
             try:
@@ -6194,7 +6241,7 @@ def interactive_invoke(
                 # 忽略任何展示上的异常，避免干扰主流程
                 pass
 
-    # 新增：上下文窗口用量展示
+    # 上下文窗口用量展示
     def _print_token_usage(
         latest_usage: Dict[str, Any], elapsed_sec: Optional[float] = None
     ) -> None:
@@ -6298,7 +6345,7 @@ def interactive_invoke(
         # 展示用户消息（彩色）
         _print_user(user_text)
 
-        nonlocal conversation_terminated  # 新增：允许在子函数内更新终止标志
+        nonlocal conversation_terminated  # 允许在子函数内更新终止标志
 
         messages.append(
             {
@@ -6307,7 +6354,7 @@ def interactive_invoke(
                 + build_author_note(provider=provider, model=model, role=role, user_role_name=user_role_name),
             }
         )  # 注入脚注防止遗忘
-        # 新增：记录用户消息
+        # 记录用户消息
         chatdb_log_message(chat_session_uuid, turn_index, "user", user_text)
         latest_elapsed: Optional[float] = None
 
@@ -6329,7 +6376,7 @@ def interactive_invoke(
                 except Exception:
                     pass
 
-        # 新增：回调工厂 —— 复用思考输出与结束换行（改为写入 StreamBox）
+        # 回调工厂 —— 复用思考输出与结束换行（改为写入 StreamBox）
         def _make_reasoning_handlers(
             box: _StreamPanels,
         ) -> Tuple[ReasoningHandler, ReasoningEndHandler, ReasoningState]:
@@ -6347,7 +6394,7 @@ def interactive_invoke(
 
             return _on_reasoning, _on_reasoning_end, state
 
-        # 新增：回调工厂 —— 复用 content 分片输出（改为写入 StreamBox，并保留 antml 检测）
+        # 回调工厂 —— 复用 content 分片输出（改为写入 StreamBox，并保留 antml 检测）
         def _make_content_delta_handler(
             box: _StreamPanels,
         ) -> Tuple[DeltaHandler, ContentDeltaState]:
@@ -6462,7 +6509,7 @@ def interactive_invoke(
                 latest_elapsed = time.perf_counter() - _t0
                 # 结束动态 Panel
                 stream_ui.stop()
-                # 新增：记录助手消息（含流式 reasoning）
+                # 记录助手消息（含流式 reasoning）
                 chatdb_log_message(
                     chat_session_uuid,
                     turn_index,
@@ -6472,7 +6519,7 @@ def interactive_invoke(
                     usage=usage1,
                     elapsed_sec=latest_elapsed,
                 )
-                # 新增：长输出自动保存
+                # 长输出自动保存
                 try:
                     LONG_SAVE_THRESHOLD = int(
                         os.getenv("TODO_STREAM_SAVE_THRESHOLD", "20000")
@@ -6656,7 +6703,7 @@ def interactive_invoke(
                     # 反思成功，退出循环
                     break
 
-                # 新增：检测安全终止控制信号（会话立即终止，不再追加模型调用）
+                # 检测安全终止控制信号（会话立即终止，不再追加模型调用）
                 termination_triggered = any(
                     isinstance(r.get("output"), str)
                     and r.get("output").startswith(CONTROL_TERMINATE)
@@ -6763,7 +6810,7 @@ def interactive_invoke(
                             usage=usageN,
                             elapsed_sec=latest_elapsed,
                         )
-                        # 新增：后续轮次也保存长输出
+                        # 后续轮次也保存长输出
                         try:
                             LONG_SAVE_THRESHOLD = int(
                                 os.getenv("TODO_STREAM_SAVE_THRESHOLD", "20000")
@@ -6876,7 +6923,7 @@ def interactive_invoke(
     if initial_user:
         chat_turn(initial_user)
 
-    # 新增：块输入模式状态
+    # 块输入模式状态
     block_mode: bool = False
     block_lines: List[str] = []
 
@@ -6885,7 +6932,7 @@ def interactive_invoke(
             try:
                 user_in = session.prompt().strip()  # type: ignore
                 _ctrl_c_count = 0  # 正常获取到输入即重置 Ctrl+C 计数
-                # 新增：每次输入后再裁剪一次，防止会话内无限增长
+                # 每次输入后再裁剪一次，防止会话内无限增长
                 if not _hist_disabled:
                     _prune_history_file(HISTORY_FILE, _hist_max_lines, _hist_max_bytes)
             except KeyboardInterrupt:
@@ -6954,7 +7001,7 @@ def interactive_invoke(
                 except Exception:
                     console.print(tools_desc)
                 continue
-            # 新增：查看系统提示词
+            # 查看系统提示词
             if user_in in {"/system", ":system"}:
                 try:
                     content = Markdown(system_full) if Markdown else system_full  # type: ignore
@@ -7192,7 +7239,7 @@ def interactive_invoke(
     except KeyboardInterrupt:
         console.print("")  # newline
     except Exception as loop_e:
-        # 新增：兜底异常捕获，避免 DB 会话泄漏或连接处于不一致状态
+        # 兜底异常捕获，避免 DB 会话泄漏或连接处于不一致状态
         try:
             console.print(
                 Panel(
@@ -7287,7 +7334,7 @@ def main() -> None:
         help=f"explicit OpenRouter key, or set env {OPENROUTER_API_KEY_ENV}",
     )
 
-    # 新增：Jina Web 搜索
+    # Jina Web 搜索
     wsp = sub.add_parser("web-search")
     wsp.add_argument("query")
     wsp.add_argument("--api-key", help=f"explicit key, or set env {JINA_API_KEY_ENV}")
@@ -7295,7 +7342,7 @@ def main() -> None:
         "--full", action="store_true", help="return full content instead of no-content"
     )
 
-    # 新增：Jina Reader 抓取网页 Markdown
+    # Jina Reader 抓取网页 Markdown
     wfp = sub.add_parser("web-fetch")
     wfp.add_argument("url")
     wfp.add_argument("--api-key", help=f"explicit key, or set env {JINA_API_KEY_ENV}")
@@ -7348,6 +7395,13 @@ def main() -> None:
         ],
         default="default",
         help="选择角色身份；deep researcher 启用深度研究模式; game roleplay 开启角色扮演",
+    )
+    inv.add_argument(
+        "--user-role-name",
+        "--user_role_name",
+        dest="user_role_name",
+        default="vip_7",
+        help="用户在对话中的身份名（用于注入 author note，默认 vip_7）",
     )
     inv.add_argument(
         "--stream",
@@ -7406,7 +7460,7 @@ def main() -> None:
         help="存在时不覆盖（默认覆盖）",
     )
 
-    # 新增：精细新增 process（与 mcp-register 近似，保留分离语义）
+    # 精细新增 process（与 mcp-register 近似，保留分离语义）
     mcp_add_proc = sub.add_parser(
         "mcp-add-process",
         help="显式新增一个 process 模式 MCP Server（不存在时添加，存在报错）",
@@ -7421,7 +7475,6 @@ def main() -> None:
         "--timeout", type=int, default=30, help="超时秒数（默认 30）"
     )
 
-    # 新增：更新
     mcp_upd = sub.add_parser(
         "mcp-update", help="更新已存在 server 的 command/args/env/timeout"
     )
@@ -7444,13 +7497,13 @@ def main() -> None:
     )
     mcp_upd.add_argument("--timeout", type=int, help="新的 timeoutSeconds")
 
-    # 新增：关闭（不移除配置，只终止进程）
+    # 关闭（不移除配置，只终止进程）
     mcp_shutdown = sub.add_parser(
         "mcp-shutdown", help="终止正在运行的 server 进程（保留配置）"
     )
     mcp_shutdown.add_argument("name")
 
-    # 新增：tail stderr
+    # tail stderr
     mcp_tail = sub.add_parser("mcp-tail", help="查看 server 最近 stderr 日志")
     mcp_tail.add_argument("name")
     mcp_tail.add_argument(
@@ -7866,6 +7919,7 @@ def main() -> None:
                     stream=getattr(args, "stream", False),
                     theme=getattr(args, "theme", "auto"),
                     tone_ane_style_name=getattr(args, "tone_ane_style_name", "default"),
+                    user_role_name=getattr(args, "user_role_name", "vip_7"),
                 )
             except Exception as e:
                 print(f"Interactive invoke failed: {e}", file=sys.stderr)
