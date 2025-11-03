@@ -875,8 +875,45 @@ def build_system_header(provider: str, model: str) -> str:
     )
 
 
-# search 工具的提示词单独声明
+# 工具调用指导
+def build_tools_guidance_prompt(provider: str, model: str):
+    return (
+        "\n\n"
+        "当需要使用工具时，请严格按照以下 ANTML (Anthropic Tool Markup Language) 格式输出：  \n"
+        "<antml:function_calls>  \n"
+        '  <antml:invoke name="工具名称">  \n'
+        '    <antml:parameter name="参数名1"><![CDATA[ 参数值1 ]]></antml:parameter>  \n'
+        '    <antml:parameter name="参数名..."><![CDATA[ 参数值... ]]></antml:parameter>  \n'
+        '    <antml:parameter name="参数名N"><![CDATA[ 参数值N ]]></antml:parameter>  \n'
+        "  </antml:invoke>  \n"
+        "</antml:function_calls>  \n"
+        "### 详细规范说明  \n"
+        "1. **外层容器**: 使用 `<antml:function_calls>` 标签包裹所有工具调用  \n"
+        '2. **工具调用**: 每个工具使用 `<antml:invoke name="工具名">` 标签  \n'
+        '3. **参数传递**: 使用 `<antml:parameter name="参数名"><![CDATA[  参数值 ]]></antml:parameter>` 格式  \n'
+        '4. **request_sig**: 额外加入 `<antml:parameter name="request_sig"><![CDATA[ sig ]]></antml:parameter>`，用于标记请求的唯一性自签文本；与后端生成的随机段组合为 request_id，不会传入工具实现  \n'
+        '5. **commentary**: 额外加入 `<antml:parameter name="commentary"><![CDATA[ 原因/思考 ]]></antml:parameter>`，用于说明调用该工具的思考过程与理由；思考说明，仅用于向用户展示，提高可解释性，不会传入工具  \n'
+        "6. **内部通信标签**: 工具调用结果的传递 `<antml:function_results>`，工具返回时由工具进行包装，你即不生成该标签，也不暴露该标签给用户。  \n工具调用结果的传递 `<antml:function_results>`，工具返回时由工具进行包装，你即不生成该标签，也不暴露该标签给用户。  \n工具调用结果的传递 `<antml:function_results>`，工具返回时由工具进行包装，你即不生成该标签，也不暴露该标签给用户。  \n"
+        "### 示例演示  \n"
+        "<antml:function_calls>  \n"
+        '  <antml:invoke name="tool__jina__web_search">  \n'
+        '    <antml:parameter name="request_sig"><![CDATA[ ... ]]></antml:parameter>  \n'
+        '    <antml:parameter name="commentary"><![CDATA[ 用户在问 X 的权威定义；，可能是为了确认具体网站链接，但我已有的知识不足以回答这个问题，让我先进行关键词搜索，看看有什么线索。我需要先用单一意图关键词检索定义与来源。 ]]></antml:parameter>  \n'
+        '    <antml:parameter name="query"><![CDATA[ X term definition ]]></antml:parameter>  \n'
+        "  </antml:invoke>  \n"
+        "</antml:function_calls>  \n"
+        "若无需工具，直接回复自然语言。深度研究模式下建议使用“工具后即刻反思并接续下一步”的紧耦合循环。  \n"
+        "\n\n"
+        "# 工具调用的解释性\n\n"
+        "当你进行解释性文字输出时，仅在“解释”段落内转义 antml 标签符号，避免被宿主程序解析。  \n"
+        "  - 按如下映射进行转义：`< -> &lt;`，`> -> &gt;`，`& -> &amp;`；在属性上下文再转义：`\" -> &quot;`，`' -> &apos;`。  \n"
+        "  - 代码块与工具载荷（payload）不转义，请用代码围栏包裹，原样输出。  \n"
+        "  - 将所有工具调用统一放在整条回复最末尾独立小节`工具调用`内；若无工具调用，写明`工具调用：无`。  \n"
+        "  - 禁止在解释段落中输出未转义的 `<`、`>`、`&`；不要使用真实 XML 标签作为分隔符，使用纯文本分隔线（如`---`）。  \n"
+    )
 
+
+# search 工具的提示词单独声明
 def build_search_tool_prompt_snippet(provider: str, model: str, search_tools: list[str]) -> str:
     """构造搜索工具的声明提示词，用于LLM识别到Search工具，以便激活其管理 搜索+工具 语境范围的能力"""
     
@@ -900,8 +937,6 @@ def build_search_tool_prompt_snippet(provider: str, model: str, search_tools: li
         return ""
 
 # 默认身份提示函数-日程管理
-
-
 def build_role_identity_prompt() -> str:
     """构造交互模式默认使用的角色身份提示词。"""
     return (
@@ -1197,7 +1232,7 @@ def build_system_footer(provider: str, model: str) -> str:
     )
 
 
-# 系统提示词-尾
+# 用户消息-尾
 def build_author_note(provider: str, model: str, role:str, user_role_name) -> str:
     """构造用户消息脚注。"""
     think_injector = (
@@ -6016,40 +6051,7 @@ def interactive_invoke(
     conversation_terminated: bool = False
 
     tools_desc = get_tools_description()
-    tools_guidance = (
-        "\n\n"
-        "当需要使用工具时，请严格按照以下 ANTML (Anthropic Tool Markup Language) 格式输出：  \n"
-        "<antml:function_calls>  \n"
-        '  <antml:invoke name="工具名称">  \n'
-        '    <antml:parameter name="参数名1"><![CDATA[ 参数值1 ]]></antml:parameter>  \n'
-        '    <antml:parameter name="参数名..."><![CDATA[ 参数值... ]]></antml:parameter>  \n'
-        '    <antml:parameter name="参数名N"><![CDATA[ 参数值N ]]></antml:parameter>  \n'
-        "  </antml:invoke>  \n"
-        "</antml:function_calls>  \n"
-        "### 详细规范说明  \n"
-        "1. **外层容器**: 使用 `<antml:function_calls>` 标签包裹所有工具调用  \n"
-        '2. **工具调用**: 每个工具使用 `<antml:invoke name="工具名">` 标签  \n'
-        '3. **参数传递**: 使用 `<antml:parameter name="参数名"><![CDATA[  参数值 ]]></antml:parameter>` 格式  \n'
-        '4. **request_sig**: 额外加入 `<antml:parameter name="request_sig"><![CDATA[ sig ]]></antml:parameter>`，用于标记请求的唯一性自签文本；与后端生成的随机段组合为 request_id，不会传入工具实现  \n'
-        '5. **commentary**: 额外加入 `<antml:parameter name="commentary"><![CDATA[ 原因/思考 ]]></antml:parameter>`，用于说明调用该工具的思考过程与理由；思考说明，仅用于向用户展示，提高可解释性，不会传入工具  \n'
-        "6. **内部通信标签**: 工具调用结果的传递 `<antml:function_results>`，工具返回时由工具进行包装，你即不生成该标签，也不暴露该标签给用户。  \n工具调用结果的传递 `<antml:function_results>`，工具返回时由工具进行包装，你即不生成该标签，也不暴露该标签给用户。  \n工具调用结果的传递 `<antml:function_results>`，工具返回时由工具进行包装，你即不生成该标签，也不暴露该标签给用户。  \n"
-        "### 示例演示  \n"
-        "<antml:function_calls>  \n"
-        '  <antml:invoke name="tool__jina__web_search">  \n'
-        '    <antml:parameter name="request_sig"><![CDATA[ ... ]]></antml:parameter>  \n'
-        '    <antml:parameter name="commentary"><![CDATA[ 用户在问 X 的权威定义；，可能是为了确认具体网站链接，但我已有的知识不足以回答这个问题，让我先进行关键词搜索，看看有什么线索。我需要先用单一意图关键词检索定义与来源。 ]]></antml:parameter>  \n'
-        '    <antml:parameter name="query"><![CDATA[ X term definition ]]></antml:parameter>  \n'
-        "  </antml:invoke>  \n"
-        "</antml:function_calls>  \n"
-        "若无需工具，直接回复自然语言。深度研究模式下建议使用“工具后即刻反思并接续下一步”的紧耦合循环。  \n"
-        "\n\n"
-        "# 工具调用的解释性\n\n"
-        "当你进行解释性文字输出时，仅在“解释”段落内转义 antml 标签符号，避免被宿主程序解析。  \n"
-        "  - 按如下映射进行转义：`< -> &lt;`，`> -> &gt;`，`& -> &amp;`；在属性上下文再转义：`\" -> &quot;`，`' -> &apos;`。  \n"
-        "  - 代码块与工具载荷（payload）不转义，请用代码围栏包裹，原样输出。  \n"
-        "  - 将所有工具调用统一放在整条回复最末尾独立小节`工具调用`内；若无工具调用，写明`工具调用：无`。  \n"
-        "  - 禁止在解释段落中输出未转义的 `<`、`>`、`&`；不要使用真实 XML 标签作为分隔符，使用纯文本分隔线（如`---`）。  \n"
-    )
+    tools_guidance = build_tools_guidance_prompt(provider=provider, model=model)
     # 若调用方未指定 --system（仍为 DEFAULT_SYSTEM_PROMPT），则在交互模式中使用角色身份提示词
     canonical_role = (role or "default").replace("-", "_").replace(" ", "_").lower()
     effective_system = (
