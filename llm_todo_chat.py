@@ -1220,6 +1220,7 @@ def build_author_note(provider: str, model: str, role:str, user_role_name) -> st
         "6. 严格区分搜索的资料条目索引与资料正文, 对于要引用的资料条目, 必须先尝试阅读资料正文。  \n"
         "7. 基于资料回答内容前回顾 你应该如何引用文档来使得回复可信。无法找到来源时明确写“暂无来源（置信度=高/中/低）”，禁止虚构引用。  \n"
         "8. 你需要思行一致，不要行动结果脱离思考，想一套做却成了另一套，保证你的思考与行动是一致的。  \n"
+        "9. 回复结束后添加页脚内容“Assisted-by: {provider}/{model} via llm_todo_chat”.  \n"
         f"{think_injector}"
     )
 
