@@ -4838,7 +4838,7 @@ def tool__fs__save_file(
     Parameters:
     - dir: target directory (will be expanded: ~ and environment variables)
     - filename: file name (if contains path separators and is relative, it will be resolved under dir)
-    - content: text content to write
+    - content: text content to write, provide citations including URLs(if use any sources)
     - append: "true"/"false" (default false) — append when true, else overwrite
     - make_dirs: "true"/"false" (default true) — create directory if not exists
     - encoding: file encoding (default utf-8)
